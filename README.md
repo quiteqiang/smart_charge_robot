@@ -108,3 +108,4 @@ smart_charge_robot/
 - 动态障碍物为矩形/圆柱解析模型，非刚体物理；
 - 自动测试全链路约 12-18 分钟（真实导航时序，未做加速回放）。
 # smart_charge_robot
+# smart_charge_robot
