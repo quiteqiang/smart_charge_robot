@@ -1,0 +1,47 @@
+<?xml version="1.0"?>
+<!-- 简化矿卡差速底盘：视觉几何 + base_link -> base_laser / imu_link 静态 TF。
+     运动学由 smart_charge_simulation 仿真；本文件仅提供可视化与 TF 链。 -->
+<robot name="smart_charge_mining_truck">
+
+  <material name="truck_yellow"><color rgba="0.85 0.65 0.05 1.0"/></material>
+  <material name="dark_grey"><color rgba="0.15 0.15 0.15 1.0"/></material>
+
+  <link name="base_link">
+    <visual>
+      <origin xyz="0.0 0.0 0.20"/>
+      <geometry><box size="0.70 0.45 0.30"/></geometry>
+      <material name="truck_yellow"/>
+    </visual>
+    <visual>
+      <origin xyz="-0.10 0.0 0.42"/>
+      <geometry><box size="0.45 0.40 0.14"/></geometry>
+      <material name="dark_grey"/>
+    </visual>
+    <collision>
+      <origin xyz="0.0 0.0 0.20"/>
+      <geometry><box size="0.70 0.45 0.30"/></geometry>
+    </collision>
+  </link>
+
+  <link name="base_laser">
+    <visual>
+      <origin xyz="0.0 0.0 0.0"/>
+      <geometry><cylinder radius="0.05" length="0.06"/></geometry>
+      <material name="dark_grey"/>
+    </visual>
+  </link>
+
+  <joint name="laser_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="base_laser"/>
+    <origin xyz="0.15 0.0 0.38"/>
+  </joint>
+
+  <link name="imu_link"/>
+
+  <joint name="imu_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="imu_link"/>
+  </joint>
+
+</robot>

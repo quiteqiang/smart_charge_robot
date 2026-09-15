@@ -1,0 +1,18 @@
+/**:
+  ros__parameters:
+    max_linear_vel: 0.15
+    max_angular_vel: 0.5
+    xy_tolerance: 0.04
+    yaw_tolerance: 0.06
+    kp_yaw: 1.8
+    kp_y: 1.2
+    kp_dist: 0.8
+    final_linear_cap: 0.05
+    final_range: 0.35
+    align_tolerance: 0.15
+    timeout_s: 90.0
+    collision_stop_distance: 0.18
+    undock_distance: 0.8
+    undock_timeout_s: 60.0
+    control_hz: 10.0
+    pose_timeout_s: 1.0

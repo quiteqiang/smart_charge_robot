@@ -1,0 +1,5 @@
+# 快速设置电池 SOC，用于测试低电量 / 恢复场景
+float64 soc        # 目标 SOC，0.0 ~ 1.0
+---
+bool success
+string message

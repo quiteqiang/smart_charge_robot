@@ -1,0 +1,104 @@
+Panels:
+  - Class: rviz_common/Displays
+    Name: Displays
+    Property Tree Widget:
+      Expanded:
+        - /Global Options1
+        - /Map1
+        - /LaserScan1
+      Splitter Ratio: 0.5
+  - Class: rviz_common/Views
+    Name: Views
+Visualization Manager:
+  Class: ""
+  Displays:
+    - Class: rviz_default_plugins/Grid
+      Name: Grid
+      Value: true
+    - Class: rviz_default_plugins/TF
+      Name: TF
+      Value: true
+      Marker Scale: 0.5
+    - Class: rviz_default_plugins/Map
+      Name: Map
+      Topic:
+        Value: /map
+        Durability Policy: Transient Local
+      Value: true
+      Color Scheme: map
+    - Class: rviz_default_plugins/Map
+      Name: GlobalCostmap
+      Topic:
+        Value: /global_costmap/costmap
+      Value: false
+      Color Scheme: costmap
+    - Class: rviz_default_plugins/Map
+      Name: LocalCostmap
+      Topic:
+        Value: /local_costmap/costmap
+      Value: true
+      Color Scheme: costmap
+    - Class: rviz_default_plugins/LaserScan
+      Name: LaserScan
+      Topic:
+        Value: /scan
+      Value: true
+      Size (Pixels): 4
+      Color Transformer: FlatColor
+    - Class: rviz_default_plugins/RobotModel
+      Name: RobotModel
+      Value: true
+      Description Topic:
+        Value: /robot_description
+    - Class: rviz_default_plugins/Path
+      Name: GlobalPlan
+      Topic:
+        Value: /plan
+      Value: true
+      Color: 0; 170; 0
+    - Class: rviz_default_plugins/Path
+      Name: LocalPlan
+      Topic:
+        Value: /local_plan
+      Value: true
+      Color: 255; 0; 0
+    - Class: rviz_default_plugins/Odometry
+      Name: Odometry
+      Topic:
+        Value: /odom
+      Value: false
+    - Class: rviz_default_plugins/MarkerArray
+      Name: MissionStatus
+      Topic:
+        Value: /status_text
+      Value: true
+    - Class: rviz_default_plugins/Marker
+      Name: DockPose
+      Topic:
+        Value: /visualization_marker_dock
+      Value: true
+  Global Options:
+    Fixed Frame: map
+    Frame Rate: 15
+  Tools:
+    - Class: rviz_default_plugins/MoveCamera
+    - Class: rviz_default_plugins/SetInitialPose
+      Topic:
+        Value: /initialpose
+    - Class: rviz_default_plugins/SetGoal
+      Topic:
+        Value: /goal_pose
+  Value: true
+  Views:
+    Current:
+      Class: rviz_default_plugins/Orbit
+      Distance: 18
+      Focal Point:
+        X: 2
+        Y: 1
+        Z: 0
+      Pitch: 1.35
+      Yaw: 3.14
+Window Geometry:
+  Height: 900
+  Width: 1440

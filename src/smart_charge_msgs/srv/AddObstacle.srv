@@ -1,0 +1,10 @@
+# 向仿真注入一个圆形障碍物（用于动态避障测试）
+string name        # 障碍物名称（同名覆盖）
+float64 x          # 位置（map 坐标系，米）
+float64 y
+float64 radius     # 半径（米）
+float64 vx         # 线速度 x（米/秒，可为 0）
+float64 vy         # 线速度 y
+---
+bool success
+string message

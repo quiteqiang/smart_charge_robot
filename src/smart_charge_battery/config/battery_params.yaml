@@ -1,0 +1,10 @@
+battery_simulator:
+  ros__parameters:
+    initial_soc: 1.0            # 初始电量
+    discharge_rate: 0.002       # 满速行驶时的 SOC/s 放电速率
+    idle_discharge_rate: 0.0001 # 静止待机 SOC/s（保持真实感）
+    charge_rate: 0.01           # 泊靠充电时的 SOC/s 充电速率
+    low_soc_threshold: 0.25     # 低电量阈值（任务暂停）
+    resume_soc_threshold: 0.85  # 恢复任务阈值
+    max_linear_speed: 0.5       # 放电速率归一化用的最大线速度 m/s
+    publish_rate: 2.0           # /battery_state 发布频率 Hz

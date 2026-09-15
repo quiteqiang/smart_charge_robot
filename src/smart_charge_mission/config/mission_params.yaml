@@ -1,0 +1,13 @@
+/**:
+  ros__parameters:
+    # waypoints_file 由 mission.launch.py 注入（smart_charge_navigation 包内）
+    task_waypoints: ["work_1", "work_2"]
+    pre_dock_waypoint: "pre_dock"
+    low_soc_threshold: 0.25
+    resume_soc_threshold: 0.85
+    max_docking_retries: 3
+    max_nav_retries: 2
+    dock_success_timeout_s: 150.0
+    charge_start_timeout_s: 30.0
+    tf_loss_timeout_s: 5.0
+    goal_reached_tolerance_m: 0.5

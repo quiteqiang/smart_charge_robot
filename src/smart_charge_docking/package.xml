@@ -1,0 +1,15 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>smart_charge_docking</name>
+  <version>0.1.0</version>
+  <description>低速精准泊靠控制器：输入充电桩相对位姿，输出低速 cmd_vel</description>
+  <maintainer email="dev@example.com">smart_charge_robot</maintainer>
+  <license>Apache-2.0</license>
+  <depend>rclpy</depend>
+  <depend>geometry_msgs</depend>
+  <depend>sensor_msgs</depend>
+  <depend>std_msgs</depend>
+  <depend>std_srvs</depend>
+  <depend>tf_transformations</depend>
+  <export><build_type>ament_python</build_type></export>
+</package>

@@ -1,0 +1,13 @@
+/**:
+  ros__parameters:
+    # world_file 由 sim.launch.py 注入（包内 config/world.yaml 的绝对路径）
+    rate_hz: 20.0
+    scan_beams: 180
+    range_min: 0.12
+    range_max: 12.0
+    cmd_timeout_s: 0.6
+    max_linear_vel: 0.6
+    max_angular_vel: 1.2
+    wheel_radius: 0.10
+    wheel_separation: 0.42
+    laser_x: 0.15

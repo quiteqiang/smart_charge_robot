@@ -1,0 +1,26 @@
+# Reproducible dev environment for smart_charge_robot.
+# Usage:
+#   docker compose build            # build the image (once)
+#   docker compose run --rm dev     # interactive shell in the workspace
+#   ./scripts/demo.sh               # one-key full demo (headless by default)
+
+services:
+  dev:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    image: smart_charge_robot:jazzy
+    user: "1000:1000"
+    working_dir: /home/ubuntu/ws
+    environment:
+      # Isolate DDS traffic; keep deterministic.
+      ROS_DOMAIN_ID: ${ROS_DOMAIN_ID:-42}
+      # Allow RViz/GUI to be forwarded when an X server is available.
+      DISPLAY: ${DISPLAY:-}
+      QT_X11_NO_MITSHM: "1"
+    volumes:
+      - .:/home/ubuntu/ws
+      - /tmp/.X11-unix:/tmp/.X11-unix:rw
+    stdin_open: true
+    tty: true
+    command: bash

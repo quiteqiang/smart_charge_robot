@@ -1,0 +1,8 @@
+# 任务/充电相关航点（frame: map，与 maps/site.pgm 同源）
+frame: map
+waypoints:
+  start:    {x: 1.0,  y: 1.0,  yaw: 0.0}
+  work_1:   {x: 15.0, y: 4.0,  yaw: 1.5708}
+  work_2:   {x: 13.0, y: 15.0, yaw: 3.1416}
+  pre_dock: {x: 3.2,  y: 17.0, yaw: 0.0}
+  dock:     {x: 1.2,  y: 17.0, yaw: 3.1416}

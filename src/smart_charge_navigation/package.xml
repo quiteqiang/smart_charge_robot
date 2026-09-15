@@ -1,0 +1,13 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>smart_charge_navigation</name>
+  <version>0.1.0</version>
+  <description>地图、AMCL、Nav2 配置与启动（裁剪版 bringup，适配 2GB 内存环境）</description>
+  <maintainer email="dev@example.com">smart_charge_robot</maintainer>
+  <license>Apache-2.0</license>
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>nav2_bringup</exec_depend>
+  <exec_depend>nav2_msgs</exec_depend>
+  <exec_depend>tf2_ros</exec_depend>
+  <export><build_type>ament_python</build_type></export>
+</package>
