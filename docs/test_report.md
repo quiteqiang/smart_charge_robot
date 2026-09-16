@@ -30,9 +30,10 @@
 
 ### 场景 3：SOC<25% 切换充电任务 — ✅ PASSED
 - 输入：任务执行中 `/set_soc 0.20`
-- 预期：取消当前导航并保存任务 → `LOW_BATTERY → NAVIGATING_TO_DOCK`
+- 预期：抢占当前导航并保存任务 → `LOW_BATTERY → NAVIGATING_TO_DOCK`
 - 实际：通过
-- 证据：`[charge_mission] 低电量 20%，取消当前导航并保存任务 work_1` → `状态转换: EXECUTING_TASK -> LOW_BATTERY` → `LOW_BATTERY -> NAVIGATING_TO_DOCK 规划充电路径`
+- 证据：`[charge_mission] 低电量 20%，抢占当前导航并保存任务 work_1` → `状态转换: EXECUTING_TASK -> LOW_BATTERY` → `LOW_BATTERY -> NAVIGATING_TO_DOCK 规划充电路径`
+- 注：原实现在此处显式 `cancel_goal_async()`，会连带取消刚下发的充电桩目标并白耗一次导航重试（issue #6，已修复）。现依赖 `navigate_to_pose` 单目标服务端的抢占语义。
 
 ### 场景 4：进入预停靠区与泊靠区 — ✅ PASSED
 - 输入：承接场景 3 自动执行
@@ -93,7 +94,7 @@
 - 环境：macOS 26.6.2 / 8 vCPU / 16 GB；Docker Desktop 27.5.1（VM 8 CPU / 8.2 GB）
 - 平台：基础镜像 `osrf/ros:jazzy-desktop` 仅发布 amd64，故经 `docker-compose.override.yml` 固定 `platform: linux/amd64`，由 Rosetta 模拟运行（实测 CPU 密集循环约为原生 1.3 倍耗时）
 - 镜像构建约 12 分钟；`colcon build` 34 s；bringup 首次即就绪（~2–8 s，未触发 `run_tests.sh` 的重试逻辑）
-- 完整套件结果：**9 passed in 949.78s (0:15:49)** ✅（修复 issue #5 之后）
+- 完整套件结果：**9 passed in 730.69s (0:12:10)** ✅（修复 issue #5、#6 之后；日志 `logs/test_run_20260916_214024.log`）
 - 修复前同环境结果：8 passed, 1 failed in 1121.22s (0:18:41) —— 场景 9 失败，根因见下
 - 日志：`logs/test_run_20260916_165935.log`（9 绿）、`logs/test_run_20260916_160518.log`（修复前）、`logs/s9_withfix.log`、`logs/s9_prefix.log`（均已 gitignore）
 
@@ -107,8 +108,10 @@
    `acknowledge goal request` 出现 0 次、`连续失败` 0 次。
 2. **取消旧目标连带取消新目标** —— 低电量分支在 `cancel_goal_async()` 之后立即下发充电桩目标，
    `navigate_to_pose` 为单目标服务端，取消可能落在新目标上，静默消耗一次导航重试。见 issue #6。
-   **未修复**：9 绿那次运行仍出现 2 次 `导航重试 1/2: pre_dock`（场景 3、场景 7 各一次），
-   均被重试吸收。修复 #5 后单次重试不再致命，但余量仍然只有一次。
+   **已修复**：移除 `_on_battery` 中的显式 `cancel_goal_async()`，改由抢占终结旧目标。
+   修复后完整套件 9 绿，日志中 `导航重试` 出现 0 次（修复前 2 次），
+   且 `导航 work_1/work_2 [失败/取消] (来源 task)` 仍出现 3 次 —— 证明旧目标确实被抢占终结，
+   不是把问题藏起来。导航重试余量恢复为 2 次。
 3. **场景 7 遗留状态** —— SOC 停留在 0.20，场景 9 的前置条件窗口被自动触发的充电闭环占用。见 issue #2。
    **未修复**：场景 9 自身的前置处理足以兜住，但该脆弱性仍在。
 
