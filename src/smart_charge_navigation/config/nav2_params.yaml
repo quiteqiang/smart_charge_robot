@@ -164,4 +164,7 @@ bt_navigator:
     odom_topic: "/odom"
     bt_loop_duration: 20
     default_nav_to_pose_bt_xml: "__BT_XML__"
-    default_server_timeout: 30
+    # BT 动作客户端等待服务端确认目标的上限（非控制周期，调大不影响响应速度）。
+    # 30 ms 在低算力/模拟环境下频繁超时，与 max_nav_retries: 2 叠加会把任务直接打进
+    # ERROR_WAITING_HUMAN；实测该环境下曾出现 ~63 s 才确认。
+    default_server_timeout: 1000
