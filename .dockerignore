@@ -1,0 +1,9 @@
+.git
+build
+install
+log
+bags/*
+!bags/.gitkeep
+**/__pycache__
+*.pyc
+.env
