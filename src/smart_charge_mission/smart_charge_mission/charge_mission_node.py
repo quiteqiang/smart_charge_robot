@@ -245,6 +245,7 @@ class ChargeMission(Node):
             response.message = '仅错误态可复位'
             return response
         self.saved_task = None
+        self.task_queue.clear()
         self.nav_retries = self.dock_retries = 0
         self._set_state(IDLE, '人工复位')
         response.success = True
@@ -278,13 +279,17 @@ class ChargeMission(Node):
 
         if self.soc < low and self.state in (IDLE, EXECUTING_TASK):
             # 暂停当前任务：有活动导航则取消，保存航点
-            if self.state == EXECUTING_TASK and self._nav_goal_handle is not None:
+            # 以 _active_nav_target 判定而非 _nav_goal_handle：目标已发出但尚未被接受时
+            # handle 仍为 None（见 _send_nav_goal），此时航点同样需要保存
+            if self.state == EXECUTING_TASK and self._active_nav_target is not None:
                 self.saved_task = self._active_nav_target
-                self._nav_goal_handle.cancel_goal_async()
+                if self._nav_goal_handle is not None:
+                    self._nav_goal_handle.cancel_goal_async()
                 self.get_logger().warn(f'低电量 {self.soc:.0%}，取消当前导航并保存任务 {self.saved_task}')
             else:
                 self.get_logger().warn(f'低电量 {self.soc:.0%}，无活动任务，直接前往充电')
-            self.task_queue.clear()
+            # 保留 task_queue：充电期间无任何路径消费它，
+            # 恢复被暂停航点后 _on_nav_done 会调用 _advance_task 续跑剩余任务
             self._set_state(LOW_BATTERY, f'SOC={self.soc:.0%} < {low:.0%}')
             self._set_state(NAVIGATING_TO_DOCK, '规划充电路径')
             self.nav_retries = 0
