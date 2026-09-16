@@ -103,6 +103,16 @@ class SystemProbe(Node):
             seen = set(s for _, s in self.state_history)
         raise AssertionError(f"等待状态集合 {targets} 超时（历史 {sorted(seen)}）")
 
+    def wait_state_after(self, target: str, since: float, timeout: float) -> None:
+        """等待 since 时刻之后【新】进入 target：wait_state 基于累计历史，
+        对重复出现的状态（后置场景复用同一状态序列）会立即命中而失去断言意义。"""
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if self.count_state_entries(target, since=since) > 0:
+                return
+            time.sleep(0.2)
+        raise AssertionError(f"等待状态 {target}（{since:.0f} 之后）超时")
+
     def wait_idle_near(self, wp: str, tol: float, timeout: float) -> None:
         deadline = time.monotonic() + timeout
         tx, ty = WAYPOINTS[wp]
@@ -340,3 +350,44 @@ class TestS8_RosbagRecord:
             assert f"Topic: {t} " in info.stdout or f"Topic: {t}|" in info.stdout or f"Topic: {t}\n" in info.stdout, \
                 f"bag 中缺少话题 {t}"
         assert "Messages:" in info.stdout
+
+
+class TestS9_MultiWaypointQueueSurvivesCharge:
+    def test_remaining_queue_survives_low_battery_interrupt(self):
+        """场景9：多航点任务队列在低电量中断后完整保留。
+
+        start_task 载入 ["work_1", "work_2"]；在前往 work_1 途中注入低电量，
+        充电结束后应先返回 work_1，再继续执行 work_2，最终在 work_2 空闲。
+        修复前 task_queue 在低电量分支被清空，机器人只回到 work_1 便报告
+        "全部任务完成"，work_2 静默丢失。
+        """
+        # 前置条件：S7 将 SOC 留在 0.20，其收尾的 IDLE 断言基于累计历史并不可靠，
+        # 系统可能仍在自动触发的充电闭环中 —— 显式恢复电量并等待真正空闲
+        probe.set_dock_visible(True)
+        probe.set_soc(0.95)
+        if probe.state == "ERROR_WAITING_HUMAN":
+            probe.call_trigger("reset")
+        deadline = time.monotonic() + 420
+        while probe.state != "IDLE" and time.monotonic() < deadline:
+            time.sleep(0.5)
+        assert probe.state == "IDLE", f"场景起始状态非 IDLE：{probe.state}"
+
+        t0 = time.monotonic()
+        set_battery_param("charge_rate", 0.002)   # 放慢充电，避免测试观察到 CHARGING 前自动离桩
+        probe.call_trigger("start")               # 任务队列 = [work_1, work_2]
+        probe.wait_state_after("EXECUTING_TASK", t0, 30)
+        time.sleep(3.0)                           # 确认已在前往 work_1 途中
+
+        probe.set_soc(0.20)
+        probe.wait_state_after("LOW_BATTERY", t0, 30)
+        probe.wait_state_after("NAVIGATING_TO_DOCK", t0, 60)
+        probe.wait_state_after("CHARGING", t0, 600)
+
+        probe.set_soc(0.86)                       # 快进充满，触发离桩与任务恢复
+        set_battery_param("charge_rate", 0.01)    # 复位默认充电速率
+        probe.wait_state_after("RESUMING_TASK", t0, 120)
+
+        # 关键断言：恢复 work_1 之后必须继续执行队列中剩余的 work_2
+        probe.wait_idle_near("work_2", tol=0.8, timeout=420)
+        n = probe.count_state_entries("EXECUTING_TASK", since=t0)
+        assert n >= 2, f"EXECUTING_TASK 仅进入 {n} 次（期望 ≥2：work_1 + work_2），剩余队列疑似丢失"

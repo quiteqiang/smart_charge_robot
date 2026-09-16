@@ -6,6 +6,7 @@
 - 命令：`./scripts/run_tests.sh`（单容器启动完整系统 + `pytest tests/test_integration.py`，8 场景串行）
 - **最终结果：8 passed in 395.46s (0:06:35)** ✅
 - 完整日志：`logs/test_run_20260916_052050.log`
+- 场景 9 与 Apple Silicon 复验结果见文末「补充验证」一节（本节结果为最初的 8 场景 Linux 宿主机运行）
 
 > 调试过程中共经历 19 轮失败运行，修复了下述真实缺陷后全部通过：
 > launch 参数名冲突、rclpy 无 oneshot 定时器、泊靠 yaw 语义定义错误、
@@ -63,6 +64,16 @@
 - 实际：通过；659 条消息（mcap 存储）
 - 证据：`bags/test_scenario8/`：`Messages: 659`；`/odom Count: 331`、`/cmd_vel Count: 197`、`/scan Count: 110`、`/battery_state Count: 20`。可用 `ros2 bag play bags/test_scenario8` 回放
 
+### 场景 9：多航点任务队列在低电量中断后完整保留 — ✅ PASSED（独立运行）
+- 输入：`/mission/start_task` 载入 [work_1, work_2]；前往 work_1 途中 `/set_soc 0.20`，充满至 0.86 后恢复
+- 预期：恢复 work_1 后继续执行 work_2，最终在 work_2 (13,15) ≤0.8 m 处空闲；`EXECUTING_TASK` 进入次数 ≥2
+- 实际：独立运行通过（4:44）
+- 证据：`UNDOCKING -> RESUMING_TASK 返回被暂停任务 work_1` → `RESUMING_TASK -> EXECUTING_TASK 执行任务 work_2` → `EXECUTING_TASK -> IDLE 全部任务完成`
+- **回归有效性验证**：将 `charge_mission_node.py` 回退至修复前（`deb562d~1`），其余环境完全一致，同一场景失败于 `wait_idle_near("work_2")`：
+  `AssertionError: 未在 work_2（13.0,15.0）附近空闲，距离 11.15 m`，状态序列为 `RESUMING_TASK -> IDLE 全部任务完成`（work_2 静默丢失）。
+  即该用例确实能捕获缺陷，而非无论修复与否都通过的恒真断言。
+- 注意：在完整套件顺序执行时本场景失败，原因与本修复无关，见下节。
+
 ## 性能与稳定性观察
 - 全套 8 场景真实导航时序约 6.5–16 分钟（受 2 vCPU 负载影响波动）。
 - 低算力下 Nav2 组件启动存在竞态：`scripts/run_tests.sh` 内置就绪检查（bt_navigator active [3]）与最多 3 次 bringup 重试。
@@ -75,3 +86,38 @@
 - RPP 的 `use_collision_detection` 会在 footprint 进入障碍膨胀区时冻结机器人（安全停车语义）；狭窄走廊内的极限脱困未做专项测试。
 - 单机器人、单层 2D 场景；充电为恒定速率模型；未测试真实 BMS 异常注入（除 SOC 越界）。
 - 自动测试为顺序耦合场景（共享同一系统实例），不可乱序/并行执行。
+
+## 补充验证：Apple Silicon（Rosetta amd64 模拟）
+
+- 日期：2026-09-16
+- 环境：macOS 26.6.2 / 8 vCPU / 16 GB；Docker Desktop 27.5.1（VM 8 CPU / 8.2 GB）
+- 平台：基础镜像 `osrf/ros:jazzy-desktop` 仅发布 amd64，故经 `docker-compose.override.yml` 固定 `platform: linux/amd64`，由 Rosetta 模拟运行（实测 CPU 密集循环约为原生 1.3 倍耗时）
+- 镜像构建约 12 分钟；`colcon build` 34 s；bringup 首次即就绪（~2–8 s，未触发 `run_tests.sh` 的重试逻辑）
+- 完整套件结果：**9 passed in 949.78s (0:15:49)** ✅（修复 issue #5 之后）
+- 修复前同环境结果：8 passed, 1 failed in 1121.22s (0:18:41) —— 场景 9 失败，根因见下
+- 日志：`logs/test_run_20260916_165935.log`（9 绿）、`logs/test_run_20260916_160518.log`（修复前）、`logs/s9_withfix.log`、`logs/s9_prefix.log`（均已 gitignore）
+
+场景 9 最初在完整套件中失败，与本分支的队列修复无关，根因有三，均已登记为 issue：
+
+1. **`default_server_timeout: 30`**（`src/smart_charge_navigation/config/nav2_params.yaml:167`）
+   —— BT 动作客户端等待服务端确认目标的窗口仅 30 ms，模拟环境下频繁超出，
+   出现 `Timed out while waiting for action server to acknowledge goal request for compute_path_to_pose`；
+   因 `max_nav_retries: 2`，两次即进入 `ERROR_WAITING_HUMAN`。见 issue #5。
+   **已修复**：该值提升至 1000（本分支）。修复后完整套件 9 绿，且全程日志中
+   `acknowledge goal request` 出现 0 次、`连续失败` 0 次。
+2. **取消旧目标连带取消新目标** —— 低电量分支在 `cancel_goal_async()` 之后立即下发充电桩目标，
+   `navigate_to_pose` 为单目标服务端，取消可能落在新目标上，静默消耗一次导航重试。见 issue #6。
+   **未修复**：9 绿那次运行仍出现 2 次 `导航重试 1/2: pre_dock`（场景 3、场景 7 各一次），
+   均被重试吸收。修复 #5 后单次重试不再致命，但余量仍然只有一次。
+3. **场景 7 遗留状态** —— SOC 停留在 0.20，场景 9 的前置条件窗口被自动触发的充电闭环占用。见 issue #2。
+   **未修复**：场景 9 自身的前置处理足以兜住，但该脆弱性仍在。
+
+独立运行（`pytest -k S9`，`default_server_timeout: 1000`，其余一致）：
+
+| 被测节点 | 结果 | 失败点 |
+| --- | --- | --- |
+| 修复后（`84260b6`） | ✅ 1 passed (4:44) | —— |
+| 修复前（`deb562d~1`） | ❌ 1 failed (8:20) | `wait_idle_near("work_2")`，距 work_2 11.15 m |
+
+> 结论：队列修复有效，场景 9 是真实有效的回归用例，完整套件在本环境下 9 绿。
+> 仍未处理的 #6、#2 不影响当前结果，但都在消耗容错余量，建议在状态机抽取（#7）时一并解决。
