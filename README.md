@@ -1,5 +1,15 @@
 # smart_charge_robot
 
+Hardware-free autonomous navigation and automatic charging MVP for construction machinery (mining truck), fully demonstrable in simulation.
+ROS 2 Jazzy + Nav2 + AMCL + a custom minimal simulator, reproducible with one-click Docker.
+
+> This project is for simulation demo only. It involves no real mining trucks, no real charging piles, and no construction-machinery safety certification.
+
+<details>
+<summary>🌐 中文 (点击展开中文版)</summary>
+
+# smart_charge_robot
+
 无硬件、可仿真演示的工程机械（矿卡）自主导航与自动充电 MVP。
 ROS 2 Jazzy + Nav2 + AMCL + 自研 minimal simulator，Docker 一键复现。
 
@@ -107,5 +117,108 @@ smart_charge_robot/
 - 单机器人、单层 2D 场景；充电功率为恒定速率模型；
 - 动态障碍物为矩形/圆柱解析模型，非刚体物理；
 - 自动测试全链路约 12-18 分钟（真实导航时序，未做加速回放）。
-# smart_charge_robot
-# smart_charge_robot
+
+</details>
+
+## Closed-loop functionality
+
+Start → autonomous navigation to work waypoints (local obstacle avoidance) → auto-pause task when SOC < 25% → navigate to the charger pre-dock point → low-speed precise docking → charging handshake → undock at SOC ≥ 85% → **return and resume the paused task**.
+
+RViz2 displays the map / TF / laser / global & local paths / battery / charging state / charging pile; rosbag2 recording and automated testing are supported.
+
+## Requirements
+
+- Docker ≥ 24 and Docker Compose (**required**; the host does not need ROS/Gazebo preinstalled)
+- Recommended ≥ 2 vCPU / 2 GB RAM / 5 GB disk (verified on a 1.9 GB RAM thin host, without RViz)
+- The host can be any Linux; the development baseline is the ROS 2 Jazzy @ Ubuntu 24.04 container
+
+### Why not a native install / why not Gazebo
+
+- If the host is not Ubuntu 24.04 (e.g. Ubuntu 26.04), ROS 2 Jazzy has no official deb packages → Docker is the only viable option.
+- Gazebo Harmonic + Nav2 + RViz2 need 4 GB+ RAM; a 1.9 GB thin host will inevitably OOM → we use a
+  **Nav2-compatible minimal simulator** (differential-drive kinematics + analytic ray-cast laser + simulated AprilTag);
+  Nav2 / AMCL / the mission stack are 100% real components. See the decision record in `docs/architecture.md`.
+
+## Quick start (Docker — the only path you need)
+
+```bash
+git clone <repo> smart_charge_robot && cd smart_charge_robot
+cp .env.example .env                     # optional
+
+# Build the image (first time; based on osrf/ros:jazzy-desktop + Nav2, etc.)
+docker compose build                     # or reuse an already-built smart_charge_robot:jazzy
+
+./scripts/build.sh                       # colcon build (inside the container)
+./scripts/demo.sh                        # one-click full demo (headless)
+./scripts/demo.sh --rviz                 # enable RViz2 when an X display is available
+```
+
+After startup, open another terminal and run `./scripts/dev.sh` to enter the same container network for ros2 commands.
+
+### Demo operations (see docs/demo_script.md)
+
+```bash
+ros2 service call /mission/start_task std_srvs/srv/Trigger   # start the task queue
+./scripts/trigger_low_battery.sh 0.20                        # inject low battery -> auto charging loop
+ros2 service call /set_soc smart_charge_msgs/srv/SetSoc "{soc: 0.86}"   # fast-forward to full -> resume task
+ros2 topic echo /battery_state                               # watch the battery
+```
+
+## RViz2 observation
+
+`./scripts/demo.sh --rviz` (requires an X display, e.g. `ssh -X`). The preset `rviz/smart_charge.rviz` includes:
+Map, TF, RobotModel, LaserScan, global/local Costmap, global path `/plan`, local path `/local_plan`,
+charger marker `/visualization_marker_dock`, and battery/status text `/status_text` + `/battery_text_markers`.
+On headless machines, `ros2 topic echo /status_text` (Marker text) and `/mission_state` provide equivalent observation.
+
+## Tests
+
+```bash
+./scripts/run_tests.sh      # launch the full system and run tests/test_integration.py (8 scenarios, ~12-18 min)
+```
+
+Scenarios: ① normal navigation ② passing a dynamic obstacle without collision ③ low-battery switch to charging task ④ pre-dock + docking ⑤ SOC rise while charging ⑥ resume task at full charge ⑦ charger unavailable → retry ≤ 3 times → error state ⑧ rosbag2 record & playback.
+Results are recorded in `docs/test_report.md`.
+
+## rosbag2
+
+```bash
+./scripts/record_bag.sh                          # record key topics to bags/run_<timestamp>/
+ros2 launch smart_charge_bringup full_demo.launch.py record_bag:=true
+ros2 bag info bags/run_xxxx --yaml && ros2 bag play bags/run_xxxx
+```
+
+## Directory structure
+
+```
+smart_charge_robot/
+├── docker/Dockerfile, ../docker-compose.yml   # reproducible environment
+├── scripts/                                   # build/demo/test/record/trigger scripts
+├── src/                                       # 7 packages + msgs
+│   ├── smart_charge_base/                     # URDF mining-truck model + static TF
+│   ├── smart_charge_simulation/               # minimal simulator (Gazebo replacement)
+│   ├── smart_charge_battery/                  # battery SOC simulation
+│   ├── smart_charge_mission/                  # charging mission state machine + navigate_to_task
+│   ├── smart_charge_docking/                  # precise docking controller (Docking Server replacement)
+│   ├── smart_charge_navigation/               # Nav2/AMCL configs, maps, waypoints
+│   ├── smart_charge_bringup/                  # one-click launch + RViz preset
+│   └── smart_charge_msgs/                     # SetSoc / AddObstacle services
+├── maps/                                      # site.pgm/yaml, world.yaml (script-generated)
+├── launch/ config/                            # top-level convenience entries (point into packages)
+├── tests/test_integration.py                  # end-to-end integration tests
+├── bags/ docs/                                # recording output / architecture, demo, test reports
+```
+
+## Replacing with real hardware
+
+Only 4 interfaces need to be replaced; Nav2 / AMCL / the state machine / the docking controller require no changes (see `docs/architecture.md` §7):
+`/cmd_vel` + `/odom` + `/imu` + `/scan` (chassis and lidar drivers), `/dock_relative_pose` (AprilTag detection),
+`/dock_contact` (charging-pile connection signal), `/battery_state` (BMS).
+
+## Known limitations
+
+- Gazebo/RViz are unavailable on hosts with ≤ 2 GB RAM (the RViz config is provided; only display resources are missing);
+- Docking perception uses a noise-free simulated AprilTag, with no camera-intrinsics or occlusion modeling;
+- Single robot, single-floor 2D scene; charging power uses a constant-rate model;
+- Dynamic obstacles are rectangle/cylinder analytic models, not rigid-body physics;
+- The full automated test chain takes ~12-18 minutes (real navigation timing; no accelerated playback).
