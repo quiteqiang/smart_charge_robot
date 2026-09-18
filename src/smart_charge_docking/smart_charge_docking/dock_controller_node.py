@@ -8,7 +8,9 @@
 输入：/dock_relative_pose（充电桩在 base_link 系下的位姿，模拟 AprilTag 输出）
 输出：低速 /cmd_vel（仅泊靠期间发布，Nav2 目标结束后不存在竞争）
 服务：/dock/start（std_srvs/Trigger）、/dock/undock
-上报：/docking_success（Bool，latch）、/docking_status（String）
+上报：/docking_success（smart_charge_msgs/DockResult，latch）、/docking_status（String）
+结果带单调递增 sequence：与请求世代绑定，mission 端据此丢弃重订阅时 replay 的
+latched 旧结果，避免假成功。
 
 控制序列：朝向对齐（原地旋转）→ 接近（比例控制 + 越近越慢）→ 精调（低速小步）
 安全：限速、超时、前向激光碰撞急停；重试由 mission 状态机负责（最多 3 次）。
@@ -24,7 +26,8 @@ from rclpy.time import Time
 
 from geometry_msgs.msg import PoseStamped, Twist
 from sensor_msgs.msg import LaserScan
-from std_msgs.msg import Bool, String
+from smart_charge_msgs.msg import DockResult
+from std_msgs.msg import String
 from std_srvs.srv import Trigger
 from tf_transformations import euler_from_quaternion
 
@@ -71,6 +74,7 @@ class DockController(Node):
         self.declare_parameter('pose_timeout_s', 1.0)
 
         self.state = self.ST_IDLE
+        self._result_seq = 0   # 结果世代计数：每次 _finish 递增，防止 mission 端假成功
         self.dock_rel: tuple[float, float, float] | None = None   # x, y, yaw(base 系)
         self.dock_rel_stamp = Time()
         self.front_min_range = float('inf')
@@ -81,7 +85,7 @@ class DockController(Node):
         self.create_subscription(LaserScan, '/scan', self._on_scan, 10)
         self.cmd_pub = self.create_publisher(Twist, '/cmd_vel', 10)
         self.success_pub = self.create_publisher(
-            Bool, '/docking_success',
+            DockResult, '/docking_success',
             qos_profile=rclpy.qos.QoSProfile(
                 depth=1, durability=rclpy.qos.QoSDurabilityPolicy.TRANSIENT_LOCAL))
         self.status_pub = self.create_publisher(String, '/docking_status', 10)
@@ -89,7 +93,8 @@ class DockController(Node):
         self.create_service(Trigger, '/dock/start', self._on_start)
         self.create_service(Trigger, '/dock/undock', self._on_undock)
         self.create_timer(1.0 / self.get_parameter('control_hz').value, self._on_control)
-        self.success_pub.publish(Bool(data=False))
+        # sequence=0 仅作基线（mission 端 baseline），真实结果从 1 开始
+        self.success_pub.publish(DockResult(success=False, sequence=0))
 
     # ---------- 接口 ----------
     def _on_dock_pose(self, msg: PoseStamped) -> None:
@@ -218,7 +223,8 @@ class DockController(Node):
     def _finish(self, success: bool, message: str) -> None:
         self.cmd_pub.publish(Twist())   # 停止
         self.state = self.ST_DONE if success else self.ST_FAILED
-        self.success_pub.publish(Bool(data=success))
+        self._result_seq += 1
+        self.success_pub.publish(DockResult(success=success, sequence=self._result_seq))
         self._report(('成功: ' if success else '失败: ') + message)
         (self.get_logger().info if success else self.get_logger().error)(message)
 

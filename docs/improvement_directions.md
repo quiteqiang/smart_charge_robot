@@ -13,48 +13,13 @@
 
 ## P0 — 正确性与安全
 
-### 1. 泊靠/离桩结果通道存在竞态（`charge_mission_node.py`）
-
-`/docking_success` 是 **latched Bool 单通道**，泊靠和离桩共用：
-
-```python
-def _on_docking_success(self, msg: Bool) -> None:
-    # 泊靠与离桩互斥进行：两个 pending 都更新，轮询各取所需
-    self.pending_dock_result = msg.data
-    self.pending_undock_result = msg.data
-```
-
-问题：latched 的 `TRANSIENT_LOCAL` 意味着**新订阅者会立即收到上一次的旧结果**。场景——离桩成功后状态机回到 EXECUTING_TASK，latched 值仍为 `True`；若此时一次新的泊靠开始，`pending_dock_result` 初始为 `None` 没问题，但如果 mission 节点因重启/重订阅而重建，`wait_for_service` 成功瞬间就可能先消费到 latched 的旧 `True`，造成**假成功**。同理 dock_controller 重启后首次 publish `Bool(False)` 是初始化，但 mission 端没有结果序号/世代（generation）概念。
-
-**改进**：
-- 最小改动：结果消息里加单调递增的 `sequence` 或时间戳，mission 端只接受"晚于本次请求发出时刻"的结果。
-- 更优：把 `/dock/start` + `/docking_success` 组合升级为 **action**（`DockRobot`），结果与 goal 天然绑定，且与 `opennav_docking` 的迁移路径一致（代码注释里已声明契约对齐 Docking Server）。
-- 其次：结果拆成 `/dock/result`（泊靠）与 `/undock/result`（离桩）两个 latch 通道，消除互斥依赖的隐式约定。
-
-### 2. 低电量触发路径上的任务丢失风险（`charge_mission_node.py:279-292`）
-
-```python
-if self.soc < low and self.state in (IDLE, EXECUTING_TASK):
-    ...
-    self.task_queue.clear()        # ← 整个队列被清空
-    self._set_state(LOW_BATTERY, ...)
-    self._set_state(NAVIGATING_TO_DOCK, '规划充电路径')
-```
-
-- `self.task_queue.clear()` 会把**尚未执行的所有任务航点全部丢弃**，只有"正在导航的那一个"被 `saved_task` 保住。充电回来后 `_resume_task` 只恢复 `saved_task`，队列中其余任务静默消失。对一个"任务队列"语义的系统来说这是数据丢失。
-- 另外 LOW_BATTERY 状态被创建后立即被覆盖成 NAVIGATING_TO_DOCK，`LOW_BATTERY` 实际上**从未作为停留状态存在**——状态图文档与实现不一致（要么删掉该状态，要么让它承担"决策中"语义）。
-
-**改进**：
-- 低电量时把 `task_queue` 整体保留（或存入 `saved_queue`），恢复时按原顺序续跑：`saved_task` → 剩余队列。
-- `_on_start_task` 里 queue 用 `list.pop(0)` 是 O(n)，队列很小无妨，但语义上保留原始列表 + 索引更不易出错。
-
-### 3. 错误态恢复后任务上下文未清理（`charge_mission_node.py:242-252`）
+### 1. 错误态恢复后任务上下文未清理（`charge_mission_node.py:242-252`）
 
 `_on_reset` 只清了 `saved_task` 和重试计数，但 `task_queue` 可能残留（如果错误发生在 `_on_start_task` 之后的任务执行中，queue 里还有未跑航点）。复位回 IDLE 后这些残留航点永远不会被执行也不会被清除，下一次 `start_task` 会被覆盖——属于"能跑但脏"的状态。
 
 **改进**：`_on_reset` 里一并 `self.task_queue.clear()`，并在 `_set_state(IDLE)` 的所有入口统一清理执行上下文。
 
-### 4. 泊靠控制器对 `dock_rel` 的解包未判空（`dock_controller_node.py:155`）
+### 2. 泊靠控制器对 `dock_rel` 的解包未判空（`dock_controller_node.py:155`）
 
 ```python
 x, y, dyaw = self.dock_rel      # 第 74 行只声明了类型 Optional
@@ -66,7 +31,7 @@ x, y, dyaw = self.dock_rel      # 第 74 行只声明了类型 Optional
 - 位姿丢失容忍改为"连续 N 个控制周期丢失才失败"（如 20Hz × 0.5s），而不是瞬时 age 比较；
 - 或者 sim 端把 dock pose 提到 10-20 Hz（计算量极小），同时控制器加死区。
 
-### 5. sim 节点激光计算的 O(n·m) 开销（`mining_truck_sim_node.py:299-305`）
+### 3. sim 节点激光计算的 O(n·m) 开销（`mining_truck_sim_node.py:299-305`）
 
 每帧 180 beam，每条 beam 对 static_world 的每条 rect + pillar 做解析求交。**每帧 ~数百次求交，纯 Python**。目前 8 Hz 在小世界能撑住，但：world 变大、beam 变密、或跑在 1.9GB 瘦主机上 CPU 受限时，scan 周期会被拉长 → AMCL 更新延迟 → 定位抖动 → 连锁影响导航。且 `_publish_scan` 里 `msg.ranges = [0.0] * beams` 后又逐元素填充，`r < r_min` 时填 `inf`——注意 **0.0 是非法值但有些消费者当 0 处理**，初始 0.0 若未被覆盖（不会，循环全覆盖）倒是没问题，但语义上应初始化为 `inf` 更稳。
 
@@ -79,7 +44,7 @@ x, y, dyaw = self.dock_rel      # 第 74 行只声明了类型 Optional
 
 ## P1 — 可维护性 / 可扩展性
 
-### 6. 阈值参数三处重复定义
+### 4. 阈值参数三处重复定义
 
 `low_soc_threshold` / `resume_soc_threshold` 同时出现在：
 - `charge_mission_node.py`（declare_parameter）
@@ -90,7 +55,7 @@ x, y, dyaw = self.dock_rel      # 第 74 行只声明了类型 Optional
 
 **改进**：阈值只由 mission 节点持有并发布（参数事件 `/parameter_events` 或 `/charge_policy` 话题），电池节点被动显示。
 
-### 7. 缺少单元测试，只有端到端集成测试
+### 5. 缺少单元测试，只有端到端集成测试
 
 `tests/test_integration.py` 是 8 场景串行集成测试（12-18 分钟，README 自述顺序不可重排）。这带来两个结构性问题：
 
@@ -102,15 +67,15 @@ x, y, dyaw = self.dock_rel      # 第 74 行只声明了类型 Optional
 - 泊靠控制器的几何/控制律（`normalize_angle`、曲率修正、各阶段转换）同理可抽纯函数单测；
 - 集成测试保留 2-3 个冒烟场景即可，其余下放到单测。
 
-### 8. CI 缺失
+### 6. CI 缺失
 
-有 Docker（`docker-compose.yml` + `scripts/build.sh`）却没有 `.github/workflows/`。集成测试贵（15 分钟），但 **build + 单测（若做了 #7）+ lint** 应该每次 PR 跑。
+有 Docker（`docker-compose.yml` + `scripts/build.sh`）却没有 `.github/workflows/`。集成测试贵（15 分钟），但 **build + 单测（若做了 #5）+ lint** 应该每次 PR 跑。
 
 **改进**：
 - GitHub Action：container build → `colcon build` → `colcon test`（或 pytest 单测）→ 每晚跑一次完整集成测试（可配 `schedule` 触发）；
 - 加 `ruff`/`flake8` + `mypy --strict`（代码已大量用类型注解，收紧成本很低）。
 
-### 9. 电池模型过于理想化，限制了仿真价值
+### 7. 电池模型过于理想化，限制了仿真价值
 
 `battery_simulator_node.py` 的模型：SOC 线性充放电，电压 = 22 + 4·SOC（注释自述"示例"）。没有：
 - 内阻/压降（大电流行驶时电压下垂）；
@@ -123,13 +88,13 @@ x, y, dyaw = self.dock_rel      # 第 74 行只声明了类型 Optional
 2. 电压加一阶滞后 + 负载项：`v = OCV(soc) - I·R`，让 `/battery_state.voltage` 不再和 SOC 完全线性相关（更接近真实 BMS 输出，也为将来接真实 BMS 做接口对齐）；
 3. `capacity=100.0` 硬编码且 `percentage` 与 `capacity` 无耦合，建议 `percentage = charge / capacity` 的真实 bookkeeping。
 
-### 10. `/mission/goto` 抢占语义与文档/服务的不一致
+### 8. `/mission/goto` 抢占语义与文档/服务的不一致
 
 `_on_goto` 允许在 EXECUTING_TASK 中直接抢占当前导航目标，但 `_on_start_task` 只在 IDLE 接受。结果是：**外部系统可以通过 topic 抢占，却不能通过更正式的服务接口抢占**——权限倒挂。另外抢占时 `saved_task` 不更新，低电量中断后恢复到的是**被抢占前的旧目标**还是新目标，取决于时序，存在歧义。
 
 **改进**：明确抢占语义（"goto = 追加到队列头部"还是"替换当前任务"），并保证 `saved_task` 在任何抢占路径下都指向用户最后意图的航点。
 
-### 11. URDF 与 sim 参数无单一事实源
+### 9. URDF 与 sim 参数无单一事实源
 
 `mining_truck.urdf`（47 行）与 `sim_params.yaml` 中的 `wheel_radius: 0.10`、`wheel_separation: 0.42` 是两份手工同步的数值；`laser_x: 0.15` 只存在于 sim 参数，URDF 里 base_laser 位置要单独核对。改一个忘改另一个，robot_state_publisher 发布的 TF 就和仿真真值漂移。
 
@@ -139,23 +104,23 @@ x, y, dyaw = self.dock_rel      # 第 74 行只声明了类型 Optional
 
 ## P2 — 锦上添花
 
-### 12. rosbag 录制写死相对路径
+### 10. rosbag 录制写死相对路径
 
 `full_demo.launch.py` 里 `-o bags/demo_run` 是相对路径——依赖 launch 时的工作目录。在 systemd/robot 上启动时可能写到意想不到的地方，且同名覆盖无提示。
 
 **改进**：用 `LaunchConfiguration` + 默认值指向 `$HOME/.ros/bags/` 或带时间戳的路径；或用 `rosbag2` 的 `--max-bag-size` 做滚动。
 
-### 13. AMCL 初始位姿写死、无重定位服务
+### 11. AMCL 初始位姿写死、无重定位服务
 
 `nav2_params.yaml` 里 `set_initial_pose: true, initial_pose: (1.0, 1.0, 0.0)`——与 `waypoints.yaml` 的 `start` 一致，但仍是两处手工同步。且 sim 支持 `/sim/reset_pose`，AMCL 却不知道（TF 看门狗会发现定位丢失然后进错误态——这其实是**正确行为**，但没有"重新初始化定位"的恢复路径，复位后 AMCL 粒子仍可能收敛回旧位姿）。
 
 **改进**：launch 里用 `waypoints.yaml` 的 start 生成 AMCL 初始位姿（或反过来）；提供 `/relocalize` 服务：调 AMCL `reinitialize_global_localization` + 用 sim 真值重置（demo/调试体验提升明显）。
 
-### 14. 日志中文化
+### 12. 日志中文化
 
 状态机日志 `"状态转换: ..."`、`"低电量..."` 等是中文。对国内团队没问题，但 README 是英文为主、GitHub 公开——英文日志（或双语 key）对国际化和日志聚类工具（ELK 等按 token 分词）更友好。**优先级低**，看项目定位。
 
-### 15. 对接真实硬件的路径未产品化
+### 13. 对接真实硬件的路径未产品化
 
 代码里已埋好接口注释（"真实硬件替换方式：停用本节点，将真实 BMS 驱动发布到相同话题即可"），但没有：
 - 真实 BMS/AprilTag 驱动的参考实现或 adapter 包；
@@ -163,7 +128,7 @@ x, y, dyaw = self.dock_rel      # 第 74 行只声明了类型 Optional
 
 **改进**：给 `/dock_relative_pose` 加高斯噪声 + 丢帧模拟（sim 内 5 行），让泊靠控制在"脏数据"下也被测试覆盖——这是上真实硬件前最便宜的置信度来源。
 
-### 16. 小项清单
+### 14. 小项清单
 
 | 位置 | 问题 | 改动 |
 |---|---|---|
@@ -179,14 +144,14 @@ x, y, dyaw = self.dock_rel      # 第 74 行只声明了类型 Optional
 ## 建议实施顺序
 
 ```
-第 1 步（1-2 天）：#1 结果通道竞态修复 + #2 任务队列保留 + #3 reset 清理
-                  —— 都是 mission 节点内的局部改动，直接消除真实的丢任务/假成功风险
-第 2 步（2-3 天）：#7 状态机纯 Python 化 + 单测 + #8 CI（build+单测）
+第 1 步（0.5 天）：#1 reset 清理 —— mission 节点局部改动
+                  （结果通道竞态、任务队列保留、LOW_BATTERY 状态语义已修复）
+第 2 步（2-3 天）：#5 状态机纯 Python 化 + 单测 + #6 CI（build+单测）
                   —— 之后每次改动反馈从 15 分钟降到秒级
-第 3 步（按需）：  #4 感知丢失容忍、#6 阈值单源化、#9 电池 CC/CV、#11 TF 单源化
-第 4 步（上硬件前）：#15 感知噪声模拟 + 真实 BMS/AprilTag adapter
+第 3 步（按需）：  #2 感知丢失容忍、#4 阈值单源化、#7 电池 CC/CV、#9 TF 单源化
+第 4 步（上硬件前）：#13 感知噪声模拟 + 真实 BMS/AprilTag adapter
 ```
 
 ## 一个总体观察
 
-这个项目的**主要技术债不在任何单个 bug，而在于"所有验证都靠在完整系统上跑 15 分钟集成测试"**。状态机、泊靠控制律、电池模型、sim 几何——四块逻辑全部埋在 rclpy 回调里，耦合了 ROS 通信层。把核心业务逻辑抽成纯 Python（不 import rclpy），是当前投入产出比最高的一步：它同时解决测试反馈慢（#7）、CI 难建（#8）、重构不敢做（连锁放大所有其他项）三个问题。
+这个项目的**主要技术债不在任何单个 bug，而在于"所有验证都靠在完整系统上跑 15 分钟集成测试"**。状态机、泊靠控制律、电池模型、sim 几何——四块逻辑全部埋在 rclpy 回调里，耦合了 ROS 通信层。把核心业务逻辑抽成纯 Python（不 import rclpy），是当前投入产出比最高的一步：它同时解决测试反馈慢（#5）、CI 难建（#6）、重构不敢做（连锁放大所有其他项）三个问题。

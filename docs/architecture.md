@@ -59,7 +59,7 @@
 | `/dock_contact` | std_msgs/Bool | sim | battery | 充电枪物理接触（<0.35 m） |
 | `/charging_active` | std_msgs/Bool | mission | battery | 任务机“开始充电”握手请求 |
 | `/dock_relative_pose` | geometry_msgs/PoseStamped | sim | dock_controller | 桩在 base_link 系下位姿（模拟 AprilTag） |
-| `/docking_success` | std_msgs/Bool | dock_controller | mission | TRANSIENT_LOCAL，泊靠结果 |
+| `/docking_success` | smart_charge_msgs/DockResult | dock_controller | mission | TRANSIENT_LOCAL，泊靠/离桩结果；`sequence` 单调递增，mission 端只接受晚于本次请求的结果（防 latched 旧值假成功） |
 | `/docking_status` | std_msgs/String | dock_controller | mission/日志 | 泊靠过程文本 |
 | `/mission_state` | std_msgs/String | mission | 测试/RViz | 状态机当前状态 |
 | `/mission/goto` | std_msgs/String | navigate_to_task/测试 | mission | 单航点任务请求 |

@@ -7,6 +7,7 @@ find_package(std_msgs REQUIRED)
 
 rosidl_generate_interfaces(${PROJECT_NAME}
   "srv/SetSoc.srv"
+  "msg/DockResult.msg"
   "srv/AddObstacle.srv"
   DEPENDENCIES std_msgs
 )

@@ -11,6 +11,8 @@
 - 泊靠走 dock_controller 服务，最多重试 max_docking_retries 次；
 - "开始充电确认" = battery 节点回报 POWER_SUPPLY_STATUS_CHARGING（本节点先拉起
   /charging_active 请求充电，确认在充电状态进入前完成握手）；
+- 泊靠/离桩结果带单调 sequence（/docking_success, DockResult）：只接受晚于
+  本次请求发出时刻的结果，丢弃重订阅时 replay 的 latched 旧值，避免假成功；
 - 所有转换打结构化日志，RViz 通过 /status_text 文本标记展示 SOC 与状态。
 """
 from __future__ import annotations
@@ -27,6 +29,7 @@ from action_msgs.msg import GoalStatus
 from geometry_msgs.msg import PoseStamped, Quaternion
 from nav2_msgs.action import NavigateToPose
 from sensor_msgs.msg import BatteryState
+from smart_charge_msgs.msg import DockResult
 from std_msgs.msg import Bool, ColorRGBA, String
 from std_srvs.srv import Trigger
 from tf2_ros import Buffer, TransformException, TransformListener
@@ -75,8 +78,13 @@ class ChargeMission(Node):
         self.saved_task: str | None = None
         self.nav_retries = 0
         self.dock_retries = 0
-        self.pending_dock_result: bool | None = None
-        self.pending_undock_result: bool | None = None
+        # 泊靠/离桩结果：(sequence, success)；配合 _dock_req_seq 做世代校验，
+        # 防止重订阅 /docking_success 时消费到 latched 旧结果造成假成功
+        self.pending_dock_result: tuple[int, bool] | None = None
+        self.pending_undock_result: tuple[int, bool] | None = None
+        self._last_result_seq = 0      # 最近收到的结果序号（基线）
+        self._dock_req_seq = 0         # 本次泊靠请求发出时的基线
+        self._undock_req_seq = 0       # 本次离桩请求发出时的基线
         self._nav_goal_handle = None
         self._active_nav_target: str | None = None
         self._dock_wait_start = None
@@ -90,7 +98,7 @@ class ChargeMission(Node):
         self.dock_undock = self.create_client(Trigger, '/dock/undock')
 
         self.create_subscription(BatteryState, '/battery_state', self._on_battery, 10)
-        self.create_subscription(Bool, '/docking_success', self._on_docking_success, 10)
+        self.create_subscription(DockResult, '/docking_success', self._on_dock_result, 10)
         self.create_subscription(String, '/docking_status', self._on_docking_status, 10)
         self.create_subscription(String, '/mission/goto', self._on_goto, 10)
 
@@ -290,11 +298,11 @@ class ChargeMission(Node):
                 self.get_logger().warn(f'低电量 {self.soc:.0%}，无活动任务，直接前往充电')
             # 保留 task_queue：充电期间无任何路径消费它，
             # 恢复被暂停航点后 _on_nav_done 会调用 _advance_task 续跑剩余任务
+            # LOW_BATTERY 是真实停留状态（"决策中"）：短暂停留后由
+            # _plan_charge_route 起导航，与 docs/architecture.md 状态图一致；
+            # 之前在同一个回调内被立即覆盖成 NAVIGATING_TO_DOCK，从不真实存在
             self._set_state(LOW_BATTERY, f'SOC={self.soc:.0%} < {low:.0%}')
-            self._set_state(NAVIGATING_TO_DOCK, '规划充电路径')
-            self.nav_retries = 0
-            self.dock_retries = 0
-            self._send_nav_goal(self.get_parameter('pre_dock_waypoint').value, 'dock')
+            self._oneshot(1.0, self._plan_charge_route)
 
         if self.state == CHARGING and self.soc >= resume:
             self.get_logger().info(f'SOC 达到恢复阈值 {self.soc:.0%} >= {resume:.0%}，结束充电')
@@ -311,10 +319,20 @@ class ChargeMission(Node):
                 self._charge_request_time = None
                 self._enter_error('充电桩未确认开始充电（超时）')
 
-    def _on_docking_success(self, msg: Bool) -> None:
-        # 泊靠与离桩互斥进行：两个 pending 都更新，轮询各取所需
-        self.pending_dock_result = msg.data
-        self.pending_undock_result = msg.data
+    def _plan_charge_route(self) -> None:
+        # 低电量决策停留结束。期间可能已被看门狗转入错误态，守卫检查
+        if self.state != LOW_BATTERY:
+            return
+        self._set_state(NAVIGATING_TO_DOCK, '规划充电路径')
+        self.nav_retries = 0
+        self.dock_retries = 0
+        self._send_nav_goal(self.get_parameter('pre_dock_waypoint').value, 'dock')
+
+    def _on_dock_result(self, msg: DockResult) -> None:
+        # 泊靠与离桩互斥进行：两个 pending 都更新，轮询时按世代基线各取所需
+        self._last_result_seq = max(self._last_result_seq, msg.sequence)
+        self.pending_dock_result = (msg.sequence, msg.success)
+        self.pending_undock_result = (msg.sequence, msg.success)
 
     def _on_docking_status(self, msg: String) -> None:
         self.get_logger().info(f'[泊靠] {msg.data}')
@@ -325,6 +343,7 @@ class ChargeMission(Node):
             return
         self._set_state(DOCKING, f'第 {self.dock_retries + 1} 次泊靠尝试')
         self.pending_dock_result = None
+        self._dock_req_seq = self._last_result_seq
         self._dock_wait_start = self.get_clock().now()
         if not self.dock_start.wait_for_service(timeout_sec=5.0):
             self._dock_failed('泊靠服务不可用')
@@ -346,8 +365,10 @@ class ChargeMission(Node):
     def _poll_dock_result(self) -> None:
         if self.state != DOCKING:
             return
-        if self.pending_dock_result is not None:
-            if self.pending_dock_result:
+        result = self.pending_dock_result
+        # 世代校验：序号不晚于请求基线的是 latched 旧值（重订阅 replay），忽略
+        if result is not None and result[0] > self._dock_req_seq:
+            if result[1]:
                 self._dock_succeeded()
             else:
                 self._dock_failed('泊靠控制器报告失败')
@@ -382,6 +403,7 @@ class ChargeMission(Node):
     def _request_undock(self) -> None:
         self.charging_pub.publish(Bool(data=False))
         self.pending_undock_result = None
+        self._undock_req_seq = self._last_result_seq
         if not self.dock_undock.wait_for_service(timeout_sec=5.0):
             self._enter_error('离桩服务不可用')
             return
@@ -399,8 +421,10 @@ class ChargeMission(Node):
     def _poll_undock_result(self) -> None:
         if self.state != UNDOCKING:
             return
-        if self.pending_undock_result is not None:
-            if self.pending_undock_result:
+        result = self.pending_undock_result
+        # 世代校验：同 _poll_dock_result，忽略 latched 旧值
+        if result is not None and result[0] > self._undock_req_seq:
+            if result[1]:
                 self._resume_task()
             else:
                 self._enter_error('离桩失败')
