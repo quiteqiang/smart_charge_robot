@@ -91,7 +91,7 @@ map ──(amcl)──► odom ──(sim)──► base_link ──(URDF/robot_
 ## 4. 充电任务状态机
 
 ```
-                 ┌──────────── 低电量 SOC<25%（取消当前导航，保存航点）
+                 ┌──────────── 低电量 SOC<25%（抢占当前导航，保存航点）
                  ▼
 IDLE ──start_task──► EXECUTING_TASK ───────► LOW_BATTERY ──(~1s 决策停留)──► NAVIGATING_TO_DOCK
  ▲  ▲                    ▲   │(导航成功,队列空)                   │ 导航至预停靠点成功

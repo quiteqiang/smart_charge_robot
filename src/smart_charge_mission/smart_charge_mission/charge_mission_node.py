@@ -308,14 +308,17 @@ class ChargeMission(Node):
         resume = self.get_parameter('resume_soc_threshold').value
 
         if self.soc < low and self.state in (IDLE, EXECUTING_TASK):
-            # 暂停当前任务：有活动导航则取消，保存航点
+            # 暂停当前任务：保存航点，当前导航目标由随后下发的充电桩目标抢占
             # 以 _active_nav_target 判定而非 _nav_goal_handle：目标已发出但尚未被接受时
             # handle 仍为 None（见 _send_nav_goal），此时航点同样需要保存
             if self.state == EXECUTING_TASK and self._active_nav_target is not None:
                 self.saved_task = self._active_nav_target
-                if self._nav_goal_handle is not None:
-                    self._nav_goal_handle.cancel_goal_async()
-                self.get_logger().warn(f'低电量 {self.soc:.0%}，取消当前导航并保存任务 {self.saved_task}')
+                # 不显式 cancel：navigate_to_pose 是单目标服务端，下发充电桩目标即抢占并
+                # 终结当前任务目标。若在此处 cancel_goal_async()，取消请求会晚 ~30 ms 到达，
+                # 届时服务端的当前目标已是 pre_dock —— 取消会连带打掉刚发出的充电桩目标，
+                # 白白消耗一次 max_nav_retries（见 issue #6）。被抢占的任务目标结果由
+                # _on_nav_done 的 source/state 过滤丢弃，不会触发重试。
+                self.get_logger().warn(f'低电量 {self.soc:.0%}，抢占当前导航并保存任务 {self.saved_task}')
             else:
                 self.get_logger().warn(f'低电量 {self.soc:.0%}，无活动任务，直接前往充电')
             # 保留 task_queue：充电期间无任何路径消费它，

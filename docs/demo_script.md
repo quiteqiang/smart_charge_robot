@@ -46,7 +46,7 @@ ros2 service call /mission/start_task std_srvs/srv/Trigger
 ```
 
 **应看到**（关键高潮，约 2 分钟）：
-1. 日志 `低电量 20%，取消当前导航并保存任务` → `LOW_BATTERY → NAVIGATING_TO_DOCK`；
+1. 日志 `低电量 20%，抢占当前导航并保存任务` → `LOW_BATTERY → NAVIGATING_TO_DOCK`；
 2. 机器人横穿园区驶向充电桩预停靠点 (3.2, 17)；
 3. 到达后 `PRE_DOCKING → DOCKING`，机器人以 ≤0.15 m/s 低速对准、缓慢泊入充电桩；
 4. 泊靠成功 → 日志 `泊靠成功，请求开始充电` → 电池回报 CHARGING，`CHARGING` 状态，RViz 文本变蓝 “⚡CHARGING”，电量开始回升。
