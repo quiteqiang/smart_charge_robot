@@ -93,7 +93,7 @@ map ──(amcl)──► odom ──(sim)──► base_link ──(URDF/robot_
 ```
                  ┌──────────── 低电量 SOC<25%（取消当前导航，保存航点）
                  ▼
-IDLE ──start_task──► EXECUTING_TASK ───────► LOW_BATTERY ──► NAVIGATING_TO_DOCK
+IDLE ──start_task──► EXECUTING_TASK ───────► LOW_BATTERY ──(~1s 决策停留)──► NAVIGATING_TO_DOCK
  ▲  ▲                    ▲   │(导航成功,队列空)                   │ 导航至预停靠点成功
  │  │                    │   ▼                                    ▼
  │  │                    │  IDLE(全部任务完成)                 PRE_DOCKING ──► DOCKING
@@ -121,7 +121,7 @@ IDLE ──start_task──► EXECUTING_TASK ───────► LOW_BATTE
 /dock/start ──► ALIGN（原地旋转对准桩方向，|Δyaw|<0.15）
             ──► APPROACH（比例控制 v=k·d，线速上限 0.15 m/s；横向偏差>0.4rad 先转向）
             ──► FINAL（d<0.35 m 进入末段，线速上限 0.05 m/s，容差 x/y 0.04 m、yaw 0.06 rad）
-            ──► 成功：/docking_success=True
+            ──► 成功：/docking_success(DockResult, success=True, 递增 sequence)
 安全：前向 ±60° 激光 <0.18 m 急停失败；位姿数据失效 >1 s 失败；总超时 45 s。
 离桩：/dock/undock 直线倒车 0.8 m（线速 0.12 m/s，超时 30 s）。
 ```

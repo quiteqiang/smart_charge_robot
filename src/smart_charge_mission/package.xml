@@ -6,6 +6,7 @@
   <maintainer email="dev@example.com">smart_charge_robot</maintainer>
   <license>Apache-2.0</license>
   <depend>rclpy</depend>
+  <depend>smart_charge_msgs</depend>
   <depend>geometry_msgs</depend>
   <depend>nav2_msgs</depend>
   <depend>sensor_msgs</depend>
