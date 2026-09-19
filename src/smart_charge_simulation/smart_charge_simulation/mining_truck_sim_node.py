@@ -20,6 +20,8 @@ from rclpy.time import Time
 
 from geometry_msgs.msg import PoseStamped, TransformStamped, Twist, Vector3
 from nav_msgs.msg import Odometry
+from rcl_interfaces.msg import SetParametersResult
+from rclpy.parameter import Parameter
 from sensor_msgs.msg import Imu, JointState, LaserScan
 from std_msgs.msg import Bool, ColorRGBA
 from tf2_ros import TransformBroadcaster
@@ -211,6 +213,9 @@ class MiningTruckSim(Node):
             angles = self._np.linspace(-math.pi, math.pi, self._scan_beams, endpoint=False)
             self._beam_cos = self._np.cos(angles)
             self._beam_sin = self._np.sin(angles)
+        # 这四个参数已缓存为成员：ros2 param set 后经此回调立即生效，
+        # 避免"set 成功但扫描仍用旧值"的假象
+        self.add_on_set_parameters_callback(self._on_set_scan_params)
 
         # ---- 接口 ----
         self.create_subscription(Twist, '/cmd_vel', self._on_cmd, 10)
@@ -237,6 +242,37 @@ class MiningTruckSim(Node):
         self.get_logger().info(f'矿卡仿真器就绪，起始位姿 ({self.x:.2f}, {self.y:.2f}, {self.yaw:.2f})')
 
     # ---------- 回调 ----------
+    def _on_set_scan_params(self, params):
+        """缓存型激光参数（scan_beams/range_min/range_max/laser_x）运行时更新。"""
+        result = SetParametersResult()
+        result.successful = True
+        result.reason = ''
+        for p in params:
+            if p.type_ == Parameter.Type.NOT_SET:
+                continue
+            if p.name == 'scan_beams':
+                if p.type_ != Parameter.Type.INTEGER or p.value < 1:
+                    result.successful = False
+                    result.reason = 'scan_beams 必须为正整数'
+                    continue
+                self._scan_beams = p.value
+                if self._np is not None:
+                    angles = self._np.linspace(-math.pi, math.pi, self._scan_beams, endpoint=False)
+                    self._beam_cos = self._np.cos(angles)
+                    self._beam_sin = self._np.sin(angles)
+            elif p.name in ('range_min', 'range_max', 'laser_x'):
+                if p.type_ != Parameter.Type.DOUBLE:
+                    result.successful = False
+                    result.reason = f'{p.name} 必须为浮点数'
+                    continue
+                if p.name == 'range_min':
+                    self._scan_range_min = p.value
+                elif p.name == 'range_max':
+                    self._scan_range_max = p.value
+                else:
+                    self._laser_x = p.value
+        return result
+
     def _on_cmd(self, msg: Twist) -> None:
         self.cmd_v = msg.linear.x
         self.cmd_w = msg.angular.z
