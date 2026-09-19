@@ -24,7 +24,11 @@ jobs:
           file: docker/Dockerfile
           tags: smart_charge_robot:jazzy
           cache-from: type=gha
-          cache-to: type=gha,mode=max
+          # fork PR 没有写基础仓库 Actions cache 的权限，cache-to 导出
+          # 失败会直接挂掉构建步骤；只在同仓库/推送时导出缓存
+          cache-to: ${{ (github.event_name != 'pull_request' ||
+            github.event.pull_request.head.repo.full_name == github.repository) &&
+            'type=gha,mode=max' || '' }}
 
       # 纯 Python 逻辑（状态机/电池模型）不依赖 ROS，秒级反馈；
       # pytest 按目录递归发现 src/*/test/test_*.py
@@ -62,7 +66,11 @@ jobs:
           file: docker/Dockerfile
           tags: smart_charge_robot:jazzy
           cache-from: type=gha
-          cache-to: type=gha,mode=max
+          # fork PR 没有写基础仓库 Actions cache 的权限，cache-to 导出
+          # 失败会直接挂掉构建步骤；只在同仓库/推送时导出缓存
+          cache-to: ${{ (github.event_name != 'pull_request' ||
+            github.event.pull_request.head.repo.full_name == github.repository) &&
+            'type=gha,mode=max' || '' }}
 
       - name: Run full integration suite
         run: ./scripts/run_tests.sh

@@ -144,6 +144,13 @@ def test_set_soc_clamps_out_of_range():
     assert m.soc == 0.0
 
 
+def test_zero_or_negative_capacity_rejected():
+    with pytest.raises(ValueError):
+        BatteryModel(capacity_ah=0.0)
+    with pytest.raises(ValueError):
+        BatteryModel(capacity_ah=-10.0)
+
+
 def test_dt_negative_treated_as_zero():
     m = make(initial_soc=0.5)
     snap = m.step(-1.0, speed=0.5)

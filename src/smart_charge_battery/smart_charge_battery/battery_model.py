@@ -39,6 +39,9 @@ class BatteryModel:
                  internal_resistance: float = 2.0,
                  voltage_tau_s: float = 2.0) -> None:
         self.capacity_ah = float(capacity_ah)
+        if self.capacity_ah <= 0:
+            raise ValueError(
+                f'capacity_ah 必须为正数，收到 {capacity_ah}')
         self.max_speed = float(max_speed)
         self.cc_cv_threshold = float(cc_cv_threshold)
         self.internal_resistance = float(internal_resistance)

@@ -132,7 +132,8 @@ IDLE ──start_task──► EXECUTING_TASK ───────► LOW_BATTE
 |---|---|---|
 | `low_soc_threshold`（mission 单一持有） | 0.25 | 低电量阈值（battery 节点经 /mission_state 推导 [LOW!] 显示，不再持有副本） |
 | `resume_soc_threshold` | 0.85 | 恢复任务阈值 |
-| `charge_rate` | 0.01 /s | 充电速率（测试可调大加速） |
+| `charge_rate` | 0.01 /s | 充电 SOC/s 满速（CC 段，测试可调大加速）；SOC > `cc_cv_threshold` (0.8) 后线性降速到 0（CV 涓流） |
+| `internal_resistance` / `voltage_tau_s` | 2.0 Ω / 2.0 s | 端电压一阶滞后 + 负载压降 v = OCV(soc) − |I|·R（电池模型见 `battery_model.BatteryModel`，纯 Python 可单测） |
 | `discharge_rate` / `idle_discharge_rate` | 0.002 / 0.0001 /s | 行驶/待机放电速率 |
 | `max_docking_retries` | 3 | 泊靠最大重试 |
 | `dock_success_timeout_s` | 60 s | 等待泊靠结果总超时 |
