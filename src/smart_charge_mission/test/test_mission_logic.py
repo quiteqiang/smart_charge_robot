@@ -54,6 +54,12 @@ def assert_no_nav(effects):
     assert 'nav_goal' not in kinds(effects)
 
 
+def assert_stays(m, state, effects):
+    """finding-4 修复：两个独立断言，避免 assert_no_nav() and ... 短路。"""
+    assert_no_nav(effects)
+    assert m.state == state
+
+
 def start(m):
     ok, msg, fx = m.start_task()
     assert ok and m.state == EXECUTING_TASK
@@ -140,10 +146,10 @@ def test_plan_charge_route_orphan_guard(m):
     m.battery(0.20, False, now=0.0)
     dwell = m._low_battery_dwell_id
     fx = m.plan_charge_route(dwell + 999)   # 世代不符
-    assert_no_nav(fx) and m.state == LOW_BATTERY
+    assert_stays(m, LOW_BATTERY, fx)
     m.tf_lost(6.0)                           # 看门狗转入错误态
     fx = m.plan_charge_route(dwell)          # 状态已变
-    assert_no_nav(fx) and m.state == ERROR_WAITING_HUMAN
+    assert_stays(m, ERROR_WAITING_HUMAN, fx)
 
 
 def test_arrive_pre_dock_begins_docking(m):
@@ -423,7 +429,7 @@ def test_goto_duplicate_target_ignored(m):
 def test_goto_ignored_in_charge_cycle(m):
     m.battery(0.20, False, now=0.0)
     fx = m.goto('work_1')
-    assert_no_nav(fx) and m.state == LOW_BATTERY
+    assert_stays(m, LOW_BATTERY, fx)
 
 
 def test_goto_unknown_ignored(m):
@@ -456,3 +462,42 @@ def test_full_low_battery_cycle(m):
     assert m.state == RESUMING_TASK
     m.nav_done(True, 'work_2', 'task')          # 恢复并完成最后一个任务
     assert m.state == IDLE
+
+
+# ------------------------------------------------------------ code-review 修复回归测试
+def test_late_dock_start_failure_in_error_ignored(m):
+    """/dock/start 失败响应在途时状态机已进错误态：迟到响应不得拖出错误态
+    （review finding 2：原实现会从人工监督态把机器人开回充电桩）。"""
+    arrive_at_dock(m)
+    m.begin_docking(now=0.0)          # dock_start 调用在途（未调 dock_start_response）
+    m.tf_lost(6.0)                    # 看门狗先转入错误态
+    fx = m.dock_start_response(False, '泊靠服务调用异常: boom')
+    assert m.state == ERROR_WAITING_HUMAN
+    assert_stays(m, ERROR_WAITING_HUMAN, fx)
+    assert m.dock_retries == 0        # 未计入重试
+
+
+def test_late_undock_failure_after_reset_ignored(m):
+    """人工复位后迟到的离桩失败响应不得把机器从 IDLE 弹回错误态。"""
+    arrive_at_dock(m)
+    dock_successfully(m)
+    m.battery(0.90, True, now=20.0)   # UNDOCKING，undock 调用在途
+    m.undock_response(True)
+    m.dock_result(2, False)           # 离桩失败 -> 错误态
+    m.poll_undock(now=21.0)
+    assert m.state == ERROR_WAITING_HUMAN
+    m.reset()
+    assert m.state == IDLE
+    # 复位后 controller 侧迟到的重试/失败消息到达
+    fx = m.undock_response(False, '离桩被拒绝')
+    assert_stays(m, IDLE, fx)
+
+
+def test_update_config_applies_live(m):
+    """ros2 param set 路径（review finding 1）：运行时改配置下次决策生效。"""
+    m.update_config(resume_soc_threshold=0.50, max_nav_retries=5)
+    assert m.resume_soc_threshold == 0.50 and m.max_nav_retries == 5
+    arrive_at_dock(m)
+    dock_successfully(m)
+    m.battery(0.60, True, now=20.0)   # 0.60 >= 新的 0.50 阈值
+    assert m.state == UNDOCKING

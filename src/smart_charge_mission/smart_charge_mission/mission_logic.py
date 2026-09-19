@@ -202,6 +202,17 @@ class MissionStateMachine:
         return self._fx
 
     # ------------------------------------------------------------ 导航事件
+    def update_config(self, **overrides) -> None:
+        """运行时更新可调参数（壳的 on_set_parameters 回调接入 ros2 param set）。
+
+        与旧壳行为一致：阈值/重试/超时/航点配置在下次决策点生效，
+        无需重启节点。
+        """
+        for key, value in overrides.items():
+            if not hasattr(self, key):
+                raise AttributeError(f'未知配置项: {key}')
+            setattr(self, key, value)
+
     def nav_sent(self, name: str, source: str) -> None:
         """壳已成功把目标发给 action server（原 _send_nav_goal 的赋值点）。"""
         self._active_nav_target = name
@@ -361,12 +372,21 @@ class MissionStateMachine:
         return self._fx
 
     def dock_start_response(self, ok: bool, reason: str = '') -> list[Effect]:
-        """/dock/start 服务响应（ok=False 涵盖服务不可用/拒绝/调用异常）。"""
+        """/dock/start 服务响应（ok=False 涵盖服务不可用/拒绝/调用异常）。
+
+        状态守卫：响应在途期间看门狗/电池异常可能已把状态机转入错误态，
+        迟到的失败响应不得把机器从人工监督的错误态拖回导航。
+        """
         self._fx = []
+        if self.state != DOCKING:
+            if not ok:
+                self._log('warn',
+                          f'忽略迟到/错序的泊靠启动响应({reason})，当前状态 {self.state}')
+            return self._fx
         if not ok:
             self._dock_failed(reason)
-            return self._fx
-        self._emit(fx_oneshot(0.5, 'poll_dock'))
+        else:
+            self._emit(fx_oneshot(0.5, 'poll_dock'))
         return self._fx
 
     def poll_dock(self, now: float) -> list[Effect]:
@@ -422,8 +442,17 @@ class MissionStateMachine:
         self._emit(fx_oneshot(0.5, 'poll_undock'))
 
     def undock_response(self, ok: bool, reason: str = '') -> list[Effect]:
-        """/dock/undock 服务响应。"""
+        """/dock/undock 服务响应。
+
+        状态守卫同 dock_start_response：人工复位后迟到的失败响应不得
+        把机器从 IDLE 弹回错误态。
+        """
         self._fx = []
+        if self.state != UNDOCKING:
+            if not ok:
+                self._log('warn',
+                          f'忽略迟到/错序的离桩响应({reason})，当前状态 {self.state}')
+            return self._fx
         if not ok:
             self._enter_error(reason)
         return self._fx

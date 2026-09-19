@@ -27,6 +27,8 @@ from rclpy.node import Node
 from action_msgs.msg import GoalStatus
 from geometry_msgs.msg import PoseStamped, Quaternion
 from nav2_msgs.action import NavigateToPose
+from rcl_interfaces.msg import SetParametersResult
+from rclpy.parameter import Parameter
 from sensor_msgs.msg import BatteryState
 from smart_charge_msgs.msg import DockResult
 from std_msgs.msg import Bool, ColorRGBA, String
@@ -39,6 +41,18 @@ import yaml
 from smart_charge_mission.mission_logic import (
     ERROR_WAITING_HUMAN, IDLE, MissionStateMachine,
 )
+
+# 可运行时调参（ros2 param set）的配置项：参数名 -> (校验类型, 机器属性名)
+_LIVE_PARAMS = {
+    'low_soc_threshold': (Parameter.Type.DOUBLE, 'low_soc_threshold'),
+    'resume_soc_threshold': (Parameter.Type.DOUBLE, 'resume_soc_threshold'),
+    'max_docking_retries': (Parameter.Type.INTEGER, 'max_docking_retries'),
+    'max_nav_retries': (Parameter.Type.INTEGER, 'max_nav_retries'),
+    'dock_success_timeout_s': (Parameter.Type.DOUBLE, 'dock_success_timeout_s'),
+    'charge_start_timeout_s': (Parameter.Type.DOUBLE, 'charge_start_timeout_s'),
+    'task_waypoints': (Parameter.Type.STRING_ARRAY, 'task_waypoints'),
+    'pre_dock_waypoint': (Parameter.Type.STRING, 'pre_dock_waypoint'),
+}
 
 # oneshot 定时器到点后分发的事件：now 由壳注入
 _ONESHOT_EVENTS = {
@@ -122,9 +136,30 @@ class ChargeMission(Node):
 
         self.create_timer(0.5, self._watchdog)
         self.create_timer(1.0, self._publish_status_text)
+        # 参数在壳前实现中是逐次 get_parameter 实时读取的；纯化后由
+        # 此回调把运行时改动推进状态机，保持 ros2 param set 即时生效
+        self.add_on_set_parameters_callback(self._on_set_params)
         # 发布初始状态，迟到订阅者可立即获得
         self.state_pub.publish(String(data=self.machine.state))
         self.get_logger().info('充电任务状态机就绪 (IDLE)，等待 /mission/start_task')
+
+    def _on_set_params(self, params) -> SetParametersResult:
+        result = SetParametersResult()
+        result.successful = True
+        result.reason = ''
+        overrides: dict = {}
+        for p in params:
+            if p.type_ == Parameter.Type.NOT_SET or p.name not in _LIVE_PARAMS:
+                continue   # 未识别参数走默认存储（与 declare 行为一致）
+            expected, attr = _LIVE_PARAMS[p.name]
+            if p.type_ != expected:
+                result.successful = False
+                result.reason = f'{p.name} 类型不符，期望 {expected.name}'
+                continue
+            overrides[attr] = list(p.value) if p.type_ == Parameter.Type.STRING_ARRAY else p.value
+        if result.successful and overrides:
+            self.machine.update_config(**overrides)
+        return result
 
     # ------------------------------------------------------------ Effect 执行
     def _run(self, effects) -> None:

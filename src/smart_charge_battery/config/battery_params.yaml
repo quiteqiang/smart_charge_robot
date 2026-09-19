@@ -7,5 +7,7 @@ battery_simulator:
     # low_soc_threshold / resume_soc_threshold 由 charge_mission 节点单一持有
     # （单一事实源，见 docs/improvement_directions.md #3）；电池节点的 [LOW!]
     # 提示改为订阅 /mission_state 推导，此处不再重复定义。
+    # 仅当 mission 离线/人工错误态时的降级醒目提示用（display-only，不参与决策）：
+    low_soc_display_threshold: 0.10
     max_linear_speed: 0.5       # 放电速率归一化用的最大线速度 m/s
     publish_rate: 2.0           # /battery_state 发布频率 Hz

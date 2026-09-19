@@ -12,9 +12,13 @@
   - /battery_text_markers (visualization_msgs/Marker)：RViz 文本显示（SOC% + 状态）。
 
 阈值单一事实源：低电量/恢复阈值只由 charge_mission 节点持有并决策，
-本节点不持有副本；[LOW!] 提示改为订阅 /mission_state 推导
+本节点不持有决策副本；[LOW!] 提示改为订阅 /mission_state 推导
 （低电量充电循环进行中 = LOW_BATTERY/NAVIGATING_TO_DOCK/PRE_DOCKING/DOCKING），
 避免"电池节点与状态机阈值不一致"的维护陷阱（improvement_directions #3）。
+
+降级兜底：mission 节点未运行（''）或已进入人工错误态时，充电循环状态推导
+失效，此时用独立的 display-only 阈值 low_soc_display_threshold（刻意低于决策
+阈值，仅作"电量即将耗尽"的醒目提示，不参与任何决策）恢复提示能力。
 
 真实硬件替换方式：停用本节点，将真实 BMS 驱动发布到相同话题即可，
 任务状态机只依赖 /battery_state 与 /dock_contact 两个接口。
@@ -35,6 +39,10 @@ _CHARGE_CYCLE_STATES = frozenset({
     'LOW_BATTERY', 'NAVIGATING_TO_DOCK', 'PRE_DOCKING', 'DOCKING',
 })
 
+# mission 状态推导失效（节点离线/人工错误态）时的降级显示阈值：
+# display-only，刻意低于决策阈值 0.25，不参与任何决策
+_DEGRADED_STATES = frozenset({'', 'ERROR_WAITING_HUMAN'})
+
 
 class BatterySimulator(Node):
 
@@ -47,12 +55,14 @@ class BatterySimulator(Node):
         self.declare_parameter('charge_rate', 0.01)
         self.declare_parameter('max_linear_speed', 0.5)
         self.declare_parameter('publish_rate', 2.0)
+        self.declare_parameter('low_soc_display_threshold', 0.10)
 
         self._soc = float(self.get_parameter('initial_soc').value)
         self._discharge_rate = float(self.get_parameter('discharge_rate').value)
         self._idle_discharge_rate = float(self.get_parameter('idle_discharge_rate').value)
         self._charge_rate = float(self.get_parameter('charge_rate').value)
         self._max_speed = float(self.get_parameter('max_linear_speed').value)
+        self._low_display_thr = float(self.get_parameter('low_soc_display_threshold').value)
 
         self._speed = 0.0
         self._docked = False          # /dock_contact：充电枪物理接触
@@ -160,7 +170,9 @@ class BatterySimulator(Node):
         self._battery_pub.publish(msg)
 
         text = f'SOC: {self._soc * 100.0:5.1f}%  ' + ('⚡CHARGING' if charging else 'DISCHARGING')
-        if self._mission_state in _CHARGE_CYCLE_STATES:
+        if (self._mission_state in _CHARGE_CYCLE_STATES
+                or (self._mission_state in _DEGRADED_STATES
+                    and self._soc < self._low_display_thr)):
             text += '  [LOW!]'
         self._status_pub.publish(String(data=text))
 
