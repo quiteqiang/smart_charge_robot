@@ -6,7 +6,8 @@
 > （分支 `fix/p0-dock-pose-loss-and-scan-perf`，review 发现 1 项 Low 已修）；
 > P1 #3、#4 已修复（review 发现 2 项 Medium + 2 项 Low 已全部修复，状态机单测 38 例全绿）；
 > P1 #5（CI）、#6（电池模型）已修复（review 发现 1 项 Medium + 1 项 Low 已修，
-> 单测累计 56 例全绿）
+> 单测累计 56 例全绿）；P1 #7（抢占语义）、#8（URDF 参数单一事实源）已修复
+> （review 发现 2 项 Medium + 3 项 Low 已修，单测累计 68 例全绿）
 
 ## 总体评价
 
@@ -145,11 +146,35 @@ x, y, dyaw = self.dock_rel      # 第 74 行只声明了类型 Optional
 
 ### 7. `/mission/goto` 抢占语义与文档/服务的不一致
 
+> ✅ **已修复**（2026-09-19，commit `fbfabfd` + review 修复 `9f5cd1e`）：语义明确为
+> ——`goto` = 跳转到指定航点（EXECUTING_TASK 中抢占：显式取消当前目标、替换当前
+> 航点、剩余队列保留）；`start_task` 获得同级抢占能力（EXECUTING_TASK 中取消当前
+> 导航并以任务队列重新开始），修复"裸话题可抢占、正式服务反而不能"的权限倒挂。
+> 抢占路径下 saved_task 由 `_active_nav_target`（effect 同步链中已是最新意图）
+> 决定，任何时刻都指向用户最后意图航点。配套修掉两个潜伏缺陷（集成测试未覆盖、
+> review 复现）：① 抢占后被取消旧目标的迟到失败结果曾被误记为导航失败而错误
+> 消耗重试配额——nav_done 新增目标名过期防护；② 孤儿 retry_nav 重试会重发已
+> 取消目标覆盖新意图——失败时登记 `_retry_pending`、retry_nav 校验目标一致性、
+> 抢占时重置重试预算。壳侧 `_on_nav_result` 改为句柄身份比较，旧目标迟到结果
+> 不再清掉新目标的 goal handle（否则错误态的 cancel 会落空）。单测 44 例
+> （新增抢占/过期结果/saved_task/孤儿重试用例 6 个）。
+
 `_on_goto` 允许在 EXECUTING_TASK 中直接抢占当前导航目标，但 `_on_start_task` 只在 IDLE 接受。结果是：**外部系统可以通过 topic 抢占，却不能通过更正式的服务接口抢占**——权限倒挂。另外抢占时 `saved_task` 不更新，低电量中断后恢复到的是**被抢占前的旧目标**还是新目标，取决于时序，存在歧义。
 
 **改进**：明确抢占语义（"goto = 追加到队列头部"还是"替换当前任务"），并保证 `saved_task` 在任何抢占路径下都指向用户最后意图的航点。
 
 ### 8. URDF 与 sim 参数无单一事实源
+
+> ✅ **已修复**（2026-09-19，commit `fa08c38` + review 修复 `9f5cd1e`）：URDF 成为
+> 单一事实源——先给 `mining_truck.urdf` 补上 wheel_left/right（此前 URDF 根本没有轮，
+> 数值只活在 yaml 里），再新增纯 Python 解析器 `urdf_kinematics.py`（stdlib
+> ElementTree，5 例单测含对真实 URDF 对拍），sim 节点启动时解析（`urdf_file`
+> 参数，默认定位 smart_charge_base 包内文件）并以 URDF 值覆盖 yaml fallback，
+> 解析失败 warn 回退、任何情况下不抛异常。轮 joint 名对齐 sim 发布的
+> /joint_states，rsp 据此发轮 TF。数值零变化，纯结构重构。review 追加：
+> URDF 模式下 `ros2 param set laser_x/wheel_*` 被拒绝（TF 由 rsp 按 URDF 发布，
+> 单方面移动 raycast 原点会使 scan 与坐标系脱节）；fallback 模式恢复
+> wheel 参数 live 读参（保持在线标定能力）。
 
 `mining_truck.urdf`（47 行）与 `sim_params.yaml` 中的 `wheel_radius: 0.10`、`wheel_separation: 0.42` 是两份手工同步的数值；`laser_x: 0.15` 只存在于 sim 参数，URDF 里 base_laser 位置要单独核对。改一个忘改另一个，robot_state_publisher 发布的 TF 就和仿真真值漂移。
 
@@ -203,7 +228,7 @@ x, y, dyaw = self.dock_rel      # 第 74 行只声明了类型 Optional
                   LOW_BATTERY 状态语义、reset 上下文清理
 第 2 步（已完成）：#4 状态机纯 Python 化 ✅、#5 CI ✅（2026-09-19，build+单测
                   分钟级反馈，集成测试每晚跑）——改动反馈从 15 分钟降到秒级
-第 3 步（按需）：  #1 ✅、#3 ✅、#6 ✅（均 2026-09-19 完成）、#8 TF 单源化
+第 3 步（已完成）：#1 ✅、#3 ✅、#6 ✅、#7 ✅、#8 ✅（均 2026-09-19 完成）
 第 4 步（上硬件前）：#12 感知噪声模拟 + 真实 BMS/AprilTag adapter
 ```
 
