@@ -1,0 +1,68 @@
+name: CI
+
+on:
+  push:
+    branches: [develop, main]
+  pull_request:
+  # 每晚完整集成测试（13 分钟级，不适合 PR 门禁）+ 支持手动触发
+  schedule:
+    - cron: "23 2 * * *"
+  workflow_dispatch:
+
+jobs:
+  # PR/每次推送：镜像构建 + 纯 Python 单测 + colcon build（分钟级）
+  build-and-unit-test:
+    name: Build + unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build dev image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile
+          tags: smart_charge_robot:jazzy
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # 纯 Python 逻辑（状态机/电池模型）不依赖 ROS，秒级反馈；
+      # pytest 按目录递归发现 src/*/test/test_*.py
+      - name: Unit tests
+        run: |
+          docker run --rm --user root \
+            -v "$GITHUB_WORKSPACE:/home/ubuntu/ws" -w /home/ubuntu/ws \
+            smart_charge_robot:jazzy \
+            bash -lc 'python3 -m pytest src -q'
+
+      - name: colcon build
+        run: |
+          docker run --rm --user root \
+            -v "$GITHUB_WORKSPACE:/home/ubuntu/ws" -w /home/ubuntu/ws \
+            smart_charge_robot:jazzy \
+            bash -lc 'source /opt/ros/jazzy/setup.bash && colcon build --symlink-install'
+
+  # 夜间/手动：完整集成测试（scripts/run_tests.sh，单容器内起全栈 + 9 场景）
+  integration-nightly:
+    name: Full integration test (nightly)
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # compose 以 uid 1000 运行容器并挂载工作区（rosbag/日志要写回挂载点），
+      # GH runner 检出属 uid 1001，需先放权
+      - name: Let container user write the workspace mount
+        run: sudo chown -R 1000:1000 "$GITHUB_WORKSPACE"
+
+      - name: Build dev image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile
+          tags: smart_charge_robot:jazzy
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Run full integration suite
+        run: ./scripts/run_tests.sh
