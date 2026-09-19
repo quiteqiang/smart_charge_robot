@@ -164,8 +164,8 @@ class MiningTruckSim(Node):
         rate = self.get_parameter('rate_hz').value
         self.last_cmd_time = self.get_clock().now()
         self.create_timer(1.0 / rate, self._on_tick)
-        self.create_timer(1.0 / self.get_parameter('scan_rate_hz').value, self._publish_scan)      # 10 Hz 激光
-        self.create_timer(1.0 / 5.0, self._publish_dock_pose)  # 5 Hz 充电桩相对位姿
+        self.create_timer(1.0 / self.get_parameter('scan_rate_hz').value, self._publish_scan)      # 8 Hz 激光
+        self.create_timer(1.0 / 10.0, self._publish_dock_pose)  # 10 Hz 充电桩相对位姿（泊靠控制器 pose_timeout_s=1.0 的裕度）
         self.create_timer(1.0, self._publish_dock_marker)
         self.get_logger().info(f'矿卡仿真器就绪，起始位姿 ({self.x:.2f}, {self.y:.2f}, {self.yaw:.2f})')
 
