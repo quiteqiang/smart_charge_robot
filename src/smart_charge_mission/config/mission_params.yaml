@@ -10,4 +10,3 @@
     dock_success_timeout_s: 150.0
     charge_start_timeout_s: 30.0
     tf_loss_timeout_s: 5.0
-    goal_reached_tolerance_m: 0.5
