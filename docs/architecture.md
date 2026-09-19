@@ -130,7 +130,7 @@ IDLE ──start_task──► EXECUTING_TASK ───────► LOW_BATTE
 
 | 参数（文件） | 默认值 | 含义 |
 |---|---|---|
-| `low_soc_threshold` | 0.25 | 低电量阈值（mission + battery 同步配置） |
+| `low_soc_threshold`（mission 单一持有） | 0.25 | 低电量阈值（battery 节点经 /mission_state 推导 [LOW!] 显示，不再持有副本） |
 | `resume_soc_threshold` | 0.85 | 恢复任务阈值 |
 | `charge_rate` | 0.01 /s | 充电速率（测试可调大加速） |
 | `discharge_rate` / `idle_discharge_rate` | 0.002 / 0.0001 /s | 行驶/待机放电速率 |

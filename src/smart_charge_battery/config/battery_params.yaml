@@ -4,7 +4,8 @@ battery_simulator:
     discharge_rate: 0.002       # 满速行驶时的 SOC/s 放电速率
     idle_discharge_rate: 0.0001 # 静止待机 SOC/s（保持真实感）
     charge_rate: 0.01           # 泊靠充电时的 SOC/s 充电速率
-    low_soc_threshold: 0.25     # 低电量阈值（任务暂停）
-    resume_soc_threshold: 0.85  # 恢复任务阈值
+    # low_soc_threshold / resume_soc_threshold 由 charge_mission 节点单一持有
+    # （单一事实源，见 docs/improvement_directions.md #3）；电池节点的 [LOW!]
+    # 提示改为订阅 /mission_state 推导，此处不再重复定义。
     max_linear_speed: 0.5       # 放电速率归一化用的最大线速度 m/s
     publish_rate: 2.0           # /battery_state 发布频率 Hz

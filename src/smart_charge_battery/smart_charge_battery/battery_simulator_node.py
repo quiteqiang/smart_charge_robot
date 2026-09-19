@@ -11,6 +11,11 @@
   - /battery_state (sensor_msgs/BatteryState)：percentage、电压、充放电状态；
   - /battery_text_markers (visualization_msgs/Marker)：RViz 文本显示（SOC% + 状态）。
 
+阈值单一事实源：低电量/恢复阈值只由 charge_mission 节点持有并决策，
+本节点不持有副本；[LOW!] 提示改为订阅 /mission_state 推导
+（低电量充电循环进行中 = LOW_BATTERY/NAVIGATING_TO_DOCK/PRE_DOCKING/DOCKING），
+避免"电池节点与状态机阈值不一致"的维护陷阱（improvement_directions #3）。
+
 真实硬件替换方式：停用本节点，将真实 BMS 驱动发布到相同话题即可，
 任务状态机只依赖 /battery_state 与 /dock_contact 两个接口。
 """
@@ -18,10 +23,17 @@ import math
 
 import rclpy
 from rclpy.node import Node
+from rclpy.qos import QoSProfile, QoSDurabilityPolicy
 from sensor_msgs.msg import BatteryState
 from smart_charge_msgs.srv import SetSoc
 from std_msgs.msg import Bool, String
 from visualization_msgs.msg import Marker
+
+# 低电量充电循环中的 mission 状态（此时 SOC 必然低于 low_soc_threshold，
+# 阈值由 mission 节点单一持有，本节点只做显示推导）
+_CHARGE_CYCLE_STATES = frozenset({
+    'LOW_BATTERY', 'NAVIGATING_TO_DOCK', 'PRE_DOCKING', 'DOCKING',
+})
 
 
 class BatterySimulator(Node):
@@ -33,8 +45,6 @@ class BatterySimulator(Node):
         self.declare_parameter('discharge_rate', 0.002)
         self.declare_parameter('idle_discharge_rate', 0.0001)
         self.declare_parameter('charge_rate', 0.01)
-        self.declare_parameter('low_soc_threshold', 0.25)
-        self.declare_parameter('resume_soc_threshold', 0.85)
         self.declare_parameter('max_linear_speed', 0.5)
         self.declare_parameter('publish_rate', 2.0)
 
@@ -43,16 +53,19 @@ class BatterySimulator(Node):
         self._idle_discharge_rate = float(self.get_parameter('idle_discharge_rate').value)
         self._charge_rate = float(self.get_parameter('charge_rate').value)
         self._max_speed = float(self.get_parameter('max_linear_speed').value)
-        self._low_thr = float(self.get_parameter('low_soc_threshold').value)
-        self._resume_thr = float(self.get_parameter('resume_soc_threshold').value)
 
         self._speed = 0.0
         self._docked = False          # /dock_contact：充电枪物理接触
         self._charge_requested = False  # /charging_active：任务机请求开始充电
+        self._mission_state = ''      # /mission_state：仅用于 [LOW!] 显示推导
         self._prev_time = self.get_clock().now()
 
         self.create_subscription(Bool, '/dock_contact', self._on_dock_contact, 10)
         self.create_subscription(Bool, '/charging_active', self._on_charging_active, 10)
+        # TRANSIENT_LOCAL 与 mission 端匹配：迟到订阅也能拿到当前状态
+        self.create_subscription(
+            String, '/mission_state', self._on_mission_state,
+            QoSProfile(depth=1, durability=QoSDurabilityPolicy.TRANSIENT_LOCAL))
         # /cmd_vel 订阅用于速度比例放电；兼容 TwistStamped（Nav2 平滑输出）
         from geometry_msgs.msg import Twist, TwistStamped
         self.create_subscription(Twist, '/cmd_vel', self._on_cmd_vel, 10)
@@ -67,8 +80,8 @@ class BatterySimulator(Node):
         self.create_timer(1.0 / float(self.get_parameter('publish_rate').value),
                           self._tick)
         self.get_logger().info(
-            f'电池仿真启动: SOC={self._soc:.2f}, 低电量阈值={self._low_thr:.2f}, '
-            f'恢复阈值={self._resume_thr:.2f}')
+            f'电池仿真启动: SOC={self._soc:.2f} '
+            f'(低电量阈值由 charge_mission 单一持有，本节点仅做显示推导)')
 
     # ------------------------------------------------------------------ #
     def _on_cmd_vel(self, msg) -> None:
@@ -88,6 +101,9 @@ class BatterySimulator(Node):
             self.get_logger().info(
                 f'充电请求: {self._charge_requested} -> {msg.data}')
         self._charge_requested = msg.data
+
+    def _on_mission_state(self, msg: String) -> None:
+        self._mission_state = msg.data
 
     def _on_set_soc(self, req: SetSoc.Request,
                     res: SetSoc.Response) -> SetSoc.Response:
@@ -144,7 +160,7 @@ class BatterySimulator(Node):
         self._battery_pub.publish(msg)
 
         text = f'SOC: {self._soc * 100.0:5.1f}%  ' + ('⚡CHARGING' if charging else 'DISCHARGING')
-        if self._soc < self._low_thr:
+        if self._mission_state in _CHARGE_CYCLE_STATES:
             text += '  [LOW!]'
         self._status_pub.publish(String(data=text))
 
