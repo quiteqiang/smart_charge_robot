@@ -104,7 +104,6 @@ class MissionCore:
         # check that request_id is still the active one. Preserved as-is.
         self._tracked_nav_request_id: int | None = None
         self._nav_requests: dict[int, tuple[str, str]] = {}
-        self._nav_retry_pending: tuple[str, str] | None = None
         self._next_request_id = 1
 
         self._dock_wait_start: float | None = None
@@ -118,7 +117,11 @@ class MissionCore:
         self._dwell_timer_id: int | None = None
 
         self._next_timer_id = 1
-        self._timer_kind: dict[int, str] = {}
+        # timer_id -> (site, payload). The payload carries per-timer context
+        # that the original captured in each _oneshot's closure (the nav
+        # retry's waypoint/source), so two overlapping retries can't read
+        # each other's target.
+        self._pending_timers: dict[int, tuple[str, object]] = {}
 
     # ------------------------------------------------------------ entrypoint
     def handle(self, event: Event) -> list[Command]:
@@ -155,10 +158,11 @@ class MissionCore:
         self.state = new
         cmds.append(PublishState(new))
 
-    def _schedule_timer(self, cmds: list[Command], delay_s: float, kind: str) -> int:
+    def _schedule_timer(self, cmds: list[Command], delay_s: float, kind: str,
+                        payload: object = None) -> int:
         timer_id = self._next_timer_id
         self._next_timer_id += 1
-        self._timer_kind[timer_id] = kind
+        self._pending_timers[timer_id] = (kind, payload)
         cmds.append(ScheduleTimer(timer_id, delay_s))
         return timer_id
 
@@ -307,6 +311,12 @@ class MissionCore:
         self._tracked_nav_request_id = None
         self._active_nav_target = None
         cmds.append(Log('warn', f'nav {name} [{"succeeded" if success else "failed/cancelled"}] (source {source})'))
+        if source is None:
+            # Unknown/already-consumed request id: there is no waypoint or
+            # source to route on. Not reachable from the current shell, but
+            # falling through would retry a phantom goal and then raise a
+            # KeyError out of handle(), killing the node's callback.
+            return
         if source == 'task' and self.state not in (MissionState.EXECUTING_TASK, MissionState.RESUMING_TASK):
             return
         if source == 'dock' and self.state != MissionState.NAVIGATING_TO_DOCK:
@@ -332,13 +342,11 @@ class MissionCore:
             self._enter_error(cmds, now, f'nav {name} failed {self.nav_retries} times in a row')
         else:
             cmds.append(Log('warn', f'nav retry {self.nav_retries}/{self._max_nav_retries}: {name}'))
-            self._nav_retry_pending = (name, source)
-            self._schedule_timer(cmds, 1.0, 'nav_retry')
+            self._schedule_timer(cmds, 1.0, 'nav_retry', payload=(name, source))
 
-    def _on_nav_retry_fired(self, cmds: list[Command], now: float) -> None:
-        if self._nav_retry_pending is None:
-            return
-        name, source = self._nav_retry_pending
+    def _on_nav_retry_fired(self, cmds: list[Command], now: float,
+                            payload: tuple[str, str]) -> None:
+        name, source = payload
         if self.state not in _NAV_RETRY_EXPECTED_STATES[source]:
             return  # state changed during the 1s backoff (e.g. low battery); drop it
         self._try_send_nav_goal(cmds, name, source, now)
@@ -488,15 +496,16 @@ class MissionCore:
             self._enter_error(cmds, now, f'localization lost: map->base_link TF missing for {lost:.0f}s')
 
     def _on_timer_fired(self, cmds: list[Command], now: float, timer_id: int) -> None:
-        kind = self._timer_kind.pop(timer_id, None)
-        if kind is None:
+        entry = self._pending_timers.pop(timer_id, None)
+        if entry is None:
             return  # stale/unknown timer id, ignore
+        kind, payload = entry
         if kind == 'dwell':
             self._on_dwell_fired(cmds, now, timer_id)
         elif kind == 'pre_docking':
             self._begin_docking(cmds, now)
         elif kind == 'nav_retry':
-            self._on_nav_retry_fired(cmds, now)
+            self._on_nav_retry_fired(cmds, now, payload)
         elif kind == 'dock_poll':
             self._poll_dock_result(cmds, now)
         elif kind == 'undock_poll':

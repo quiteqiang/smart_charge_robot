@@ -70,6 +70,19 @@ def states_published(cmds):
     return [c.state for c in cmds_of(cmds, PublishState)]
 
 
+def drive_to_nav_error(core, now=0.0):
+    """Exhaust the nav retry budget for the first task waypoint (max_nav_retries=2)."""
+    cmds = core.handle(StartTaskRequested(now=now))
+    req = only(cmds, SendNavGoal)
+    cmds = core.handle(NavResult(now=now + 1.0, request_id=req.request_id, success=False))
+    timer = only(cmds, ScheduleTimer).timer_id
+    cmds = core.handle(TimerFired(now=now + 2.0, timer_id=timer))
+    req = only(cmds, SendNavGoal)
+    cmds = core.handle(NavResult(now=now + 3.0, request_id=req.request_id, success=False))
+    assert core.state == S.ERROR_WAITING_HUMAN
+    return cmds
+
+
 # ------------------------------------------------------------ 1. scaffold
 
 
@@ -114,12 +127,9 @@ def test_reset_rejected_outside_error_state():
 
 def test_reset_from_error_clears_context_and_returns_to_idle():
     core = make_core()
-    core.handle(StartTaskRequested(now=0.0))
-    core.handle(NavGoalResponse(now=1.0, request_id=1, accepted=False))
-    core.handle(NavGoalResponse(now=1.0, request_id=1, accepted=False))  # exhaust retries (max=2)
-    assert core.state == S.ERROR_WAITING_HUMAN
+    drive_to_nav_error(core)
 
-    cmds = core.handle(ResetRequested(now=2.0))
+    cmds = core.handle(ResetRequested(now=10.0))
     assert only(cmds, TriggerAck).success is True
     assert states_published(cmds) == [S.IDLE]
     assert core.saved_task is None
@@ -198,10 +208,8 @@ def test_nav_failure_retries_with_backoff_then_resends():
 
 def test_nav_retry_exhaustion_enters_error():
     core = make_core()  # max_nav_retries=2
-    core.handle(StartTaskRequested(now=0.0))
-    core.handle(NavResult(now=1.0, request_id=1, success=False))
-    cmds = core.handle(NavResult(now=2.0, request_id=2, success=False))
-    assert core.state == S.ERROR_WAITING_HUMAN
+    cmds = drive_to_nav_error(core)
+    assert core.nav_retries == 2
     assert states_published(cmds)[-1] == S.ERROR_WAITING_HUMAN
 
 
@@ -214,6 +222,42 @@ def test_stale_nav_retry_timer_after_state_moved_on_is_a_noop():
     core.handle(BatteryReading(now=1.1, percentage=0.10, charging=False))
     cmds = core.handle(TimerFired(now=2.0, timer_id=timer.timer_id))
     assert cmds_of(cmds, SendNavGoal) == []
+
+
+def test_overlapping_nav_retries_each_resend_their_own_waypoint():
+    """Two retry timers pending at once must not read each other's target.
+
+    The pre-extraction node captured (name, source) in each oneshot's closure;
+    a single shared 'pending retry' slot silently retried the newest waypoint
+    for both timers, so the older one was never retried at all.
+    """
+    core = make_core(task_waypoints=['work_1'], max_nav_retries=5)
+    cmds = core.handle(StartTaskRequested(now=0.0))
+    req1 = only(cmds, SendNavGoal)
+    assert req1.waypoint_name == 'work_1'
+
+    cmds = core.handle(GotoRequested(now=1.0, waypoint='work_2'))  # preempts req1
+    req2 = only(cmds, SendNavGoal)
+
+    cmds = core.handle(NavResult(now=2.0, request_id=req1.request_id, success=False))
+    timer_a = only(cmds, ScheduleTimer).timer_id
+    cmds = core.handle(NavResult(now=2.5, request_id=req2.request_id, success=False))
+    timer_b = only(cmds, ScheduleTimer).timer_id
+
+    cmds = core.handle(TimerFired(now=3.0, timer_id=timer_a))
+    assert only(cmds, SendNavGoal).waypoint_name == 'work_1'
+    cmds = core.handle(TimerFired(now=3.5, timer_id=timer_b))
+    assert only(cmds, SendNavGoal).waypoint_name == 'work_2'
+
+
+def test_nav_result_for_unknown_request_id_is_a_noop():
+    core = make_core()
+    core.handle(StartTaskRequested(now=0.0))
+    cmds = core.handle(NavResult(now=1.0, request_id=999, success=False))
+    assert cmds_of(cmds, SendNavGoal) == []
+    assert cmds_of(cmds, ScheduleTimer) == []
+    assert core.nav_retries == 0
+    assert core.state == S.EXECUTING_TASK
 
 
 def test_rejected_goal_counts_as_a_failure():
@@ -313,7 +357,11 @@ def test_dock_start_success_polls_then_succeeds():
 
     core.handle(DockResultReceived(now=3.1, sequence=1, success=True))
     cmds = core.handle(TimerFired(now=3.5, timer_id=poll_timer.timer_id))
-    assert core.state == S.CHARGING or any(isinstance(c, PublishChargingActive) and c.active for c in cmds)
+    assert only(cmds, PublishChargingActive).active is True
+    # Dock success does not itself enter CHARGING: it stays in DOCKING with the
+    # charge handshake clock running, awaiting the battery node's confirmation.
+    assert core.state == S.DOCKING
+    assert core._charge_request_time == 3.5
     assert core.dock_retries == 0
 
 
