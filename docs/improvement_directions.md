@@ -3,7 +3,8 @@
 > 分析日期：2026-09-16 · 基于 `develop` 分支代码逐文件深读
 > （mission 状态机 / battery 仿真 / docking 控制器 / sim 节点 / launch / nav2 参数 / 集成测试）
 > 进度更新（2026-09-19）：P0 #1、#2 已修复并过 `/code-review medium`
-> （分支 `fix/p0-dock-pose-loss-and-scan-perf`，review 发现 1 项 Low 已修）
+> （分支 `fix/p0-dock-pose-loss-and-scan-perf`，review 发现 1 项 Low 已修）；
+> P1 #3、#4 已修复（review 发现 2 项 Medium + 2 项 Low 已全部修复，状态机单测 38 例全绿）
 
 ## 总体评价
 
@@ -69,6 +70,14 @@ x, y, dyaw = self.dock_rel      # 第 74 行只声明了类型 Optional
 
 **改进**：阈值只由 mission 节点持有并发布（参数事件 `/parameter_events` 或 `/charge_policy` 话题），电池节点被动显示。
 
+> ✅ **已修复**（2026-09-19，commit `ec27ef5` + review 修复 `91260fb`）：电池节点删除
+> `low_soc_threshold` / `resume_soc_threshold` 副本（含 `battery_params.yaml`），
+> `[LOW!]` 提示改由订阅 latched `/mission_state` 推导（充电循环状态 = LOW_BATTERY /
+> NAVIGATING_TO_DOCK / PRE_DOCKING / DOCKING）。mission 节点成为唯一决策持有者。
+> review 发现的降级场景（mission 离线/人工错误态时不显示低电量警告）用独立的
+> display-only 参数 `low_soc_display_threshold`（默认 0.10，刻意低于决策阈值，
+> 不参与决策）兜底。docs/architecture.md 参数表已同步。
+
 ### 4. 缺少单元测试，只有端到端集成测试
 
 `tests/test_integration.py` 是 8 场景串行集成测试（12-18 分钟，README 自述顺序不可重排）。这带来两个结构性问题：
@@ -80,6 +89,17 @@ x, y, dyaw = self.dock_rel      # 第 74 行只声明了类型 Optional
 - 把状态机核心抽成 **不依赖 rclpy 的纯 Python 类**（输入：电池事件/导航结果/服务调用；输出：状态+动作），用 pytest 单测覆盖全部转换边（含错误路径、重试耗尽、reset）。rclpy 薄壳只做 IO。这是本项目**性价比最高的重构**——状态机逻辑 ~300 行，纯化后可测性质变；
 - 泊靠控制器的几何/控制律（`normalize_angle`、曲率修正、各阶段转换）同理可抽纯函数单测；
 - 集成测试保留 2-3 个冒烟场景即可，其余下放到单测。
+
+> ✅ **状态机纯化已完成**（2026-09-19，commit `fc147cb` + review 修复 `91260fb`）：
+> `mission_logic.MissionStateMachine`（纯 Python，不依赖 rclpy）持有全部状态/决策，
+> 副作用以 Effect 列表交回 `charge_mission_node.py` 薄壳执行；ROS 对外行为与原实现
+> 逐回调核对一致。`src/smart_charge_mission/test/test_mission_logic.py` **38 个 pytest
+> 用例**覆盖全部转换边（正常充电循环、低电量暂停/恢复、resume_none、导航/泊靠重试
+> 耗尽、服务拒绝、等待超时、latched 旧结果拒绝、控制器重启世代递增、孤儿 oneshot
+> 防护、goto 语义、非法 SOC、TF 丢失、reset、迟到服务响应防护），<0.1s 跑完。
+> review 发现并修复：参数运行时调参失效（`on_set_parameters` → `update_config`）、
+> `dock/undock` 迟到失败响应可把机器拖出错误态（加状态守卫）。
+> **仍开放**：泊靠控制器控制律单测、集成测试精简为冒烟集、#5 CI（build+单测）。
 
 ### 5. CI 缺失
 
@@ -160,9 +180,9 @@ x, y, dyaw = self.dock_rel      # 第 74 行只声明了类型 Optional
 ```
 第 1 步（已完成）：任务队列保留（#7）、结果通道竞态修复（DockResult 世代校验）、
                   LOW_BATTERY 状态语义、reset 上下文清理
-第 2 步（2-3 天）：#4 状态机纯 Python 化 + 单测 + #5 CI（build+单测）
-                  —— 之后每次改动反馈从 15 分钟降到秒级
-第 3 步（按需）：  #1 ✅（2026-09-19 已完成）、#3 阈值单源化、#6 电池 CC/CV、#8 TF 单源化
+第 2 步（2-3 天）：#4 状态机纯 Python 化 ✅（2026-09-19 已完成，38 例单测）；
+                  剩余 #5 CI（build+单测）—— 之后每次改动反馈从 15 分钟降到秒级
+第 3 步（按需）：  #1 ✅、#3 ✅（均 2026-09-19 完成）、#6 电池 CC/CV、#8 TF 单源化
 第 4 步（上硬件前）：#12 感知噪声模拟 + 真实 BMS/AprilTag adapter
 ```
 
