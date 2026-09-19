@@ -17,6 +17,9 @@
   <exec_depend>std_srvs</exec_depend>
   <exec_depend>tf2_ros</exec_depend>
   <exec_depend>tf_transformations</exec_depend>
+  <!-- 运动学参数单一事实源：解析 smart_charge_base 的 URDF（#8） -->
+  <exec_depend>smart_charge_base</exec_depend>
+  <exec_depend>ament_index_python</exec_depend>
   <!-- 可选：numpy 使激光求交走向量化的 fast path；缺省时节点自动回退纯 Python -->
   <exec_depend>python3-numpy</exec_depend>
 

@@ -37,6 +37,41 @@
     <origin xyz="0.15 0.0 0.38"/>
   </joint>
 
+  <!-- 轮：运动学参数（半径/轮距）的单一事实源。仿真器启动时从本文件
+       解析 wheel_radius / wheel_separation / laser_x（urdf_kinematics.py，
+       improvement_directions #8）；joint 名与 sim 发布的 /joint_states 对齐。
+       continuous 类型仅为让 robot_state_publisher 用 joint_states 的
+       真实转角发布轮 TF。 -->
+  <link name="wheel_left">
+    <visual>
+      <origin rpy="1.5708 0.0 0.0"/>
+      <geometry><cylinder radius="0.10" length="0.04"/></geometry>
+      <material name="dark_grey"/>
+    </visual>
+  </link>
+
+  <joint name="left_wheel_joint" type="continuous">
+    <parent link="base_link"/>
+    <child link="wheel_left"/>
+    <origin xyz="0.0 0.21 0.10"/>
+    <axis xyz="0 1 0"/>
+  </joint>
+
+  <link name="wheel_right">
+    <visual>
+      <origin rpy="1.5708 0.0 0.0"/>
+      <geometry><cylinder radius="0.10" length="0.04"/></geometry>
+      <material name="dark_grey"/>
+    </visual>
+  </link>
+
+  <joint name="right_wheel_joint" type="continuous">
+    <parent link="base_link"/>
+    <child link="wheel_right"/>
+    <origin xyz="0.0 -0.21 0.10"/>
+    <axis xyz="0 1 0"/>
+  </joint>
+
   <link name="imu_link"/>
 
   <joint name="imu_joint" type="fixed">

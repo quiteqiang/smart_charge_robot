@@ -12,9 +12,13 @@
 from __future__ import annotations
 
 import math
+import os
 from dataclasses import dataclass, field
 
 import rclpy
+from ament_index_python.packages import get_package_share_directory
+
+from smart_charge_simulation.urdf_kinematics import parse_kinematics
 from rclpy.node import Node
 from rclpy.time import Time
 
@@ -167,9 +171,13 @@ class MiningTruckSim(Node):
         self.declare_parameter('cmd_timeout_s', 0.6)
         self.declare_parameter('max_linear_vel', 0.6)
         self.declare_parameter('max_angular_vel', 1.2)
+        # wheel_radius / wheel_separation / laser_x 的单一事实源是
+        # smart_charge_base 的 mining_truck.urdf（improvement_directions #8）；
+        # 下列参数仅为 URDF 缺失/不可解析时的 fallback 默认值
         self.declare_parameter('wheel_radius', 0.10)
         self.declare_parameter('wheel_separation', 0.42)
         self.declare_parameter('laser_x', 0.15)   # base_laser 在 base_link 中的安装位置
+        self.declare_parameter('urdf_file', '')   # 空 = 解析 smart_charge_base 包内 URDF
         self.declare_parameter('publish_ground_truth_pose', True)
         self.declare_parameter('ground_truth_frame', 'map')
 
@@ -203,6 +211,9 @@ class MiningTruckSim(Node):
         self._scan_range_min = float(self.get_parameter('range_min').value)
         self._scan_range_max = float(self.get_parameter('range_max').value)
         self._laser_x = float(self.get_parameter('laser_x').value)
+        self._wheel_radius = float(self.get_parameter('wheel_radius').value)
+        self._wheel_separation = float(self.get_parameter('wheel_separation').value)
+        self._resolve_kinematics_from_urdf()
         self._np = np if _HAS_NUMPY else None
         if self._np is not None:
             self._static_rects_np = self._np.array(
@@ -242,6 +253,37 @@ class MiningTruckSim(Node):
         self.get_logger().info(f'矿卡仿真器就绪，起始位姿 ({self.x:.2f}, {self.y:.2f}, {self.yaw:.2f})')
 
     # ---------- 回调 ----------
+    def _resolve_kinematics_from_urdf(self) -> None:
+        """URDF 为运动学参数单一事实源（#8）；失败则保留 yaml fallback。"""
+        urdf_file = self.get_parameter('urdf_file').value
+        if not urdf_file:
+            try:
+                urdf_file = os.path.join(
+                    get_package_share_directory('smart_charge_base'),
+                    'urdf', 'mining_truck.urdf')
+            except Exception:  # noqa: BLE001 - 包不可定位时走 fallback
+                urdf_file = ''
+        kin = None
+        if urdf_file and os.path.isfile(urdf_file):
+            try:
+                with open(urdf_file, 'r', encoding='utf-8') as f:
+                    kin = parse_kinematics(f.read())
+            except OSError:
+                kin = None
+        if kin is None:
+            self.get_logger().warn(
+                f'URDF 运动学参数不可用（{urdf_file or "未找到文件"}），'
+                '回退 sim_params.yaml 的 wheel_radius/wheel_separation/laser_x')
+            return
+        self._wheel_radius = kin.wheel_radius
+        self._wheel_separation = kin.wheel_separation
+        self._laser_x = kin.laser_x
+        self.get_logger().info(
+            '运动学参数来自 URDF（单一事实源）: '
+            f'wheel_radius={self._wheel_radius}, '
+            f'wheel_separation={self._wheel_separation}, '
+            f'laser_x={self._laser_x}')
+
     def _on_set_scan_params(self, params):
         """缓存型激光参数（scan_beams/range_min/range_max/laser_x）运行时更新。"""
         result = SetParametersResult()
@@ -326,8 +368,8 @@ class MiningTruckSim(Node):
         self.x += v * math.cos(self.yaw) * dt
         self.y += v * math.sin(self.yaw) * dt
         self.yaw = normalize_angle(self.yaw + w * dt)
-        sep = self.get_parameter('wheel_separation').value
-        radius = self.get_parameter('wheel_radius').value
+        sep = self._wheel_separation
+        radius = self._wheel_radius
         self.wheel_l += (v - w * sep / 2.0) / radius * dt
         self.wheel_r += (v + w * sep / 2.0) / radius * dt
 

@@ -8,6 +8,10 @@
     cmd_timeout_s: 0.6
     max_linear_vel: 0.6
     max_angular_vel: 1.2
+    # --- 运动学安装参数：单一事实源是 smart_charge_base/urdf/mining_truck.urdf
+    # （improvement_directions #8，启动时由 urdf_kinematics.py 解析）；
+    # 下列取值仅为 URDF 缺失/不可解析时的 fallback，改数值请改 URDF ---
     wheel_radius: 0.10
     wheel_separation: 0.42
     laser_x: 0.15
+    urdf_file: ''            # 空 = 解析 smart_charge_base 包内 mining_truck.urdf
