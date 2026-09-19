@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
-"""电池 SOC 仿真节点。
+"""电池 SOC 仿真节点（rclpy 薄壳）。
 
-行为模型：
-  - 行驶放电：SOC 以 `discharge_rate * (|v| / max_linear_speed)` 的速率下降；
-  - 待机放电：静止时以 `idle_discharge_rate` 缓慢下降；
-  - 充电：仅当 /dock_contact 为 True（已成功泊靠充电桩）时，以 `charge_rate` 上升；
-  - 所有速率参数可调；SOC 通过 /set_soc 服务可在运行时注入（测试必备）。
-
-发布：
-  - /battery_state (sensor_msgs/BatteryState)：percentage、电压、充放电状态；
-  - /battery_text_markers (visualization_msgs/Marker)：RViz 文本显示（SOC% + 状态）。
+电池行为模型在 battery_model.BatteryModel（纯 Python，不依赖 rclpy）：
+CC/CV 两段充电曲线、电压一阶滞后 + 负载压降、Ah 电荷记账——见
+docs/improvement_directions.md #6。壳只负责 ROS IO：
+  - 订阅 /cmd_vel、/cmd_vel_smoothed：速度比例放电；
+  - 订阅 /dock_contact：充电枪物理接触；
+  - 订阅 /charging_active：任务机请求开始充电；
+  - 订阅 /mission_state（TRANSIENT_LOCAL）：仅用于 [LOW!] 显示推导；
+  - 服务 /set_soc：运行时注入 SOC（测试必备）；
+  - 发布 /battery_state (sensor_msgs/BatteryState)、/battery_text_markers、
+    /battery_status_text。
 
 阈值单一事实源：低电量/恢复阈值只由 charge_mission 节点持有并决策，
 本节点不持有决策副本；[LOW!] 提示改为订阅 /mission_state 推导
@@ -33,6 +34,8 @@ from smart_charge_msgs.srv import SetSoc
 from std_msgs.msg import Bool, String
 from visualization_msgs.msg import Marker
 
+from smart_charge_battery.battery_model import BatteryModel
+
 # 低电量充电循环中的 mission 状态（此时 SOC 必然低于 low_soc_threshold，
 # 阈值由 mission 节点单一持有，本节点只做显示推导）
 _CHARGE_CYCLE_STATES = frozenset({
@@ -50,19 +53,27 @@ class BatterySimulator(Node):
         super().__init__('battery_simulator')
 
         self.declare_parameter('initial_soc', 1.0)
+        self.declare_parameter('capacity_ah', 100.0)
         self.declare_parameter('discharge_rate', 0.002)
         self.declare_parameter('idle_discharge_rate', 0.0001)
         self.declare_parameter('charge_rate', 0.01)
+        self.declare_parameter('cc_cv_threshold', 0.8)
+        self.declare_parameter('internal_resistance', 2.0)
+        self.declare_parameter('voltage_tau_s', 2.0)
         self.declare_parameter('max_linear_speed', 0.5)
         self.declare_parameter('publish_rate', 2.0)
         self.declare_parameter('low_soc_display_threshold', 0.10)
 
-        self._soc = float(self.get_parameter('initial_soc').value)
-        self._discharge_rate = float(self.get_parameter('discharge_rate').value)
-        self._idle_discharge_rate = float(self.get_parameter('idle_discharge_rate').value)
-        self._charge_rate = float(self.get_parameter('charge_rate').value)
-        self._max_speed = float(self.get_parameter('max_linear_speed').value)
-        self._low_display_thr = float(self.get_parameter('low_soc_display_threshold').value)
+        self._model = BatteryModel(
+            capacity_ah=float(self.get_parameter('capacity_ah').value),
+            initial_soc=float(self.get_parameter('initial_soc').value),
+            max_speed=float(self.get_parameter('max_linear_speed').value),
+            cc_cv_threshold=float(self.get_parameter('cc_cv_threshold').value),
+            internal_resistance=float(self.get_parameter('internal_resistance').value),
+            voltage_tau_s=float(self.get_parameter('voltage_tau_s').value),
+        )
+        self._low_display_thr = float(
+            self.get_parameter('low_soc_display_threshold').value)
 
         self._speed = 0.0
         self._docked = False          # /dock_contact：充电枪物理接触
@@ -90,7 +101,7 @@ class BatterySimulator(Node):
         self.create_timer(1.0 / float(self.get_parameter('publish_rate').value),
                           self._tick)
         self.get_logger().info(
-            f'电池仿真启动: SOC={self._soc:.2f} '
+            f'电池仿真启动: SOC={self._model.soc:.2f} '
             f'(低电量阈值由 charge_mission 单一持有，本节点仅做显示推导)')
 
     # ------------------------------------------------------------------ #
@@ -121,10 +132,10 @@ class BatterySimulator(Node):
             res.success = False
             res.message = f'SOC {req.soc} 超出 [0,1] 范围'
             return res
-        self._soc = req.soc
+        self._model.set_soc(req.soc)
         res.success = True
-        res.message = f'SOC 已设置为 {self._soc:.2f}'
-        self.get_logger().warn(f'[测试注入] SOC = {self._soc:.2f}')
+        res.message = f'SOC 已设置为 {self._model.soc:.2f}'
+        self.get_logger().warn(f'[测试注入] SOC = {self._model.soc:.2f}')
         return res
 
     # ------------------------------------------------------------------ #
@@ -135,44 +146,37 @@ class BatterySimulator(Node):
         dt = min(dt, 1.0)  # 防止暂停后续电跳变
 
         # 速率参数每次实时读取：测试可在运行时调参加速充放电
-        charge_rate = float(self.get_parameter('charge_rate').value)
-        discharge_rate = float(self.get_parameter('discharge_rate').value)
-        idle_rate = float(self.get_parameter('idle_discharge_rate').value)
+        snap = self._model.step(
+            dt, speed=self._speed, docked=self._docked,
+            charge_requested=self._charge_requested,
+            charge_rate=float(self.get_parameter('charge_rate').value),
+            discharge_rate=float(self.get_parameter('discharge_rate').value),
+            idle_discharge_rate=float(
+                self.get_parameter('idle_discharge_rate').value))
+        self._publish(now, snap)
 
-        charging = self._docked and self._charge_requested and self._soc < 1.0
-        if self._docked and not self._charge_requested and self._soc < 1.0:
-            # 已连接但任务机未拉起充电请求：保持当前电量，等待握手
-            pass
-        elif charging:
-            self._soc = min(1.0, self._soc + charge_rate * dt)
-        else:
-            scale = min(self._speed / self._max_speed, 1.0) if self._max_speed > 0 else 0.0
-            rate = idle_rate + (discharge_rate - idle_rate) * scale
-            self._soc = max(0.0, self._soc - rate * dt)
-
-        self._publish(now)
-
-    def _publish(self, now) -> None:
-        charging = self._docked and self._charge_requested and self._soc < 1.0
-        status = BatteryState.POWER_SUPPLY_STATUS_CHARGING if charging else \
+    def _publish(self, now, snap) -> None:
+        status = BatteryState.POWER_SUPPLY_STATUS_CHARGING if snap.charging else \
             BatteryState.POWER_SUPPLY_STATUS_DISCHARGING
 
         msg = BatteryState()
         msg.header.stamp = now.to_msg()
         msg.header.frame_id = 'base_link'
-        msg.voltage = 22.0 + 4.0 * self._soc          # 22V(空) ~ 26V(满)，示例
-        msg.percentage = float(self._soc)
-        msg.capacity = 100.0
-        msg.design_capacity = 100.0
+        msg.voltage = snap.voltage
+        msg.current = snap.current          # 正 = 放电，负 = 充电 (A)
+        msg.percentage = float(snap.soc)
+        msg.capacity = float(self._model.capacity_ah)
+        msg.design_capacity = float(self._model.capacity_ah)
         msg.power_supply_status = status
         msg.power_supply_health = BatteryState.POWER_SUPPLY_HEALTH_GOOD
         msg.power_supply_technology = BatteryState.POWER_SUPPLY_TECHNOLOGY_LION
         self._battery_pub.publish(msg)
 
-        text = f'SOC: {self._soc * 100.0:5.1f}%  ' + ('⚡CHARGING' if charging else 'DISCHARGING')
+        text = (f'SOC: {snap.soc * 100.0:5.1f}%  '
+                + ('⚡CHARGING' if snap.charging else 'DISCHARGING'))
         if (self._mission_state in _CHARGE_CYCLE_STATES
                 or (self._mission_state in _DEGRADED_STATES
-                    and self._soc < self._low_display_thr)):
+                    and snap.soc < self._low_display_thr)):
             text += '  [LOW!]'
         self._status_pub.publish(String(data=text))
 
@@ -186,8 +190,8 @@ class BatterySimulator(Node):
         m.pose.position.z = 1.2
         m.pose.orientation.w = 1.0
         m.scale.z = 0.4
-        m.color.r, m.color.g, m.color.b, m.color.a = (0.1, 0.9, 0.2, 1.0) if not charging \
-            else (0.1, 0.5, 1.0, 1.0)
+        m.color.r, m.color.g, m.color.b, m.color.a = (0.1, 0.9, 0.2, 1.0) \
+            if not snap.charging else (0.1, 0.5, 1.0, 1.0)
         m.text = text
         self._text_pub.publish(m)
 

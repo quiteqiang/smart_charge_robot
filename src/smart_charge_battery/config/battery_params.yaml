@@ -3,7 +3,13 @@ battery_simulator:
     initial_soc: 1.0            # 初始电量
     discharge_rate: 0.002       # 满速行驶时的 SOC/s 放电速率
     idle_discharge_rate: 0.0001 # 静止待机 SOC/s（保持真实感）
-    charge_rate: 0.01           # 泊靠充电时的 SOC/s 充电速率
+    charge_rate: 0.01           # 泊靠充电 SOC/s 满速（CC 段）；SOC 超过
+                                 # cc_cv_threshold 后线性降速到 0（CV 涓流段）
+    cc_cv_threshold: 0.8        # CC/CV 转折 SOC：以下恒流满速，以上线性降速
+    capacity_ah: 100.0          # 标称容量：内部以 Ah 记账，SOC = charge/capacity
+    internal_resistance: 2.0    # 端电压压降 v = OCV(soc) - |I|·R 的内阻 R (Ω)；
+                                 # 仿真时间尺度压缩（~50C），取 2 Ω 使压降可见
+    voltage_tau_s: 2.0          # 端电压一阶滞后时间常数
     # low_soc_threshold / resume_soc_threshold 由 charge_mission 节点单一持有
     # （单一事实源，见 docs/improvement_directions.md #3）；电池节点的 [LOW!]
     # 提示改为订阅 /mission_state 推导，此处不再重复定义。
