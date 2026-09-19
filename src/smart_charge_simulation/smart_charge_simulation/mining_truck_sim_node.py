@@ -28,6 +28,14 @@ from visualization_msgs.msg import Marker
 
 import yaml
 
+try:
+    import numpy as np
+    _HAS_NUMPY = True
+except ImportError:
+    # 瘦主机可只装 rosdep 最小集：无 numpy 时激光回退纯 Python 逐条求交（原实现）
+    np = None
+    _HAS_NUMPY = False
+
 
 @dataclass
 class Rect:
@@ -101,6 +109,49 @@ def normalize_angle(a: float) -> float:
     return a
 
 
+def raycast_static_np(rects: 'np.ndarray', pillars: 'np.ndarray',
+                      ox: float, oy: float,
+                      dx: 'np.ndarray', dy: 'np.ndarray',
+                      r_max: float) -> 'np.ndarray':
+    """静态世界向量化求交：dx/dy 为 (B,) 光束单位方向，返回 (B,) 最近距离。
+
+    与 ray_rect/ray_circle 纯 Python 版逐点语义一致（对拍验证）：
+    slab 法处理 AABB，tmin<=0 时取出口 tmax，平行且原点在板外视为无交。
+    180 beam × 全量 rect/pillar 由 Python 层 ~千次调用压成几次数组运算。
+    """
+    neg_inf, inf = -math.inf, math.inf
+    best = np.full(dx.shape[0], r_max)
+    if rects.shape[0]:
+        xmin, xmax = rects[:, 0][None, :], rects[:, 1][None, :]
+        ymin, ymax = rects[:, 2][None, :], rects[:, 3][None, :]
+        dxr, dyr = dx[:, None], dy[:, None]
+        eps = 1e-12
+        par_x, par_y = np.abs(dxr) < eps, np.abs(dyr) < eps
+        with np.errstate(divide='ignore', invalid='ignore'):
+            t1x, t2x = (xmin - ox) / dxr, (xmax - ox) / dxr
+            t1y, t2y = (ymin - oy) / dyr, (ymax - oy) / dyr
+        tminx = np.where(par_x, neg_inf, np.minimum(t1x, t2x))
+        tmaxx = np.where(par_x, inf, np.maximum(t1x, t2x))
+        tminy = np.where(par_y, neg_inf, np.minimum(t1y, t2y))
+        tmaxy = np.where(par_y, inf, np.maximum(t1y, t2y))
+        bad = (par_x & ((ox < xmin) | (ox > xmax))) | (par_y & ((oy < ymin) | (oy > ymax)))
+        tmin = np.maximum(tminx, tminy)
+        tmax = np.minimum(tmaxx, tmaxy)
+        valid = ~bad & (tmin <= tmax) & (tmax >= 0.0)
+        t = np.where(tmin > 0.0, tmin, tmax)   # 起点在盒内时取出口距离
+        best = np.minimum(best, np.where(valid, t, inf).min(axis=1))
+    if pillars.shape[0]:
+        cx, cy, rad = pillars[:, 0][None, :], pillars[:, 1][None, :], pillars[:, 2][None, :]
+        lx, ly = cx - ox, cy - oy
+        tca = lx * dx[:, None] + ly * dy[:, None]
+        d2 = lx * lx + ly * ly - tca * tca
+        thc = np.sqrt(np.maximum(rad * rad - d2, 0.0))
+        t0, t1 = tca - thc, tca + thc
+        t = np.where(t0 > 0.0, t0, np.where(t1 > 0.0, t1, inf))
+        best = np.minimum(best, np.where(d2 <= rad * rad, t, inf).min(axis=1))
+    return best
+
+
 class MiningTruckSim(Node):
     def __init__(self) -> None:
         super().__init__('mining_truck_sim')
@@ -144,6 +195,22 @@ class MiningTruckSim(Node):
         self.wheel_r = 0.0
         self._clock_now = None
         self.dynamic_world = World()   # /sim/obstacles 注入的动态障碍物
+
+        # ---- 激光静态缓存（参数与安装位置运行时不变；光束角度固定） ----
+        self._scan_beams = int(self.get_parameter('scan_beams').value)
+        self._scan_range_min = float(self.get_parameter('range_min').value)
+        self._scan_range_max = float(self.get_parameter('range_max').value)
+        self._laser_x = float(self.get_parameter('laser_x').value)
+        self._np = np if _HAS_NUMPY else None
+        if self._np is not None:
+            self._static_rects_np = self._np.array(
+                [[r.xmin, r.xmax, r.ymin, r.ymax] for r in self.static_world.rects],
+                dtype=float).reshape(-1, 4)
+            self._static_pillars_np = self._np.array(
+                list(self.static_world.pillars), dtype=float).reshape(-1, 3)
+            angles = self._np.linspace(-math.pi, math.pi, self._scan_beams, endpoint=False)
+            self._beam_cos = self._np.cos(angles)
+            self._beam_sin = self._np.sin(angles)
 
         # ---- 接口 ----
         self.create_subscription(Twist, '/cmd_vel', self._on_cmd, 10)
@@ -281,11 +348,11 @@ class MiningTruckSim(Node):
 
     # ---------- 激光雷达：解析光线投射 ----------
     def _publish_scan(self) -> None:
-        beams = int(self.get_parameter('scan_beams').value)
-        r_min = self.get_parameter('range_min').value
-        r_max = self.get_parameter('range_max').value
-        lx = self.x + self.get_parameter('laser_x').value * math.cos(self.yaw)
-        ly = self.y + self.get_parameter('laser_x').value * math.sin(self.yaw)
+        beams = self._scan_beams
+        r_min = self._scan_range_min
+        r_max = self._scan_range_max
+        lx = self.x + self._laser_x * math.cos(self.yaw)
+        ly = self.y + self._laser_x * math.sin(self.yaw)
 
         msg = LaserScan()
         msg.header.stamp = self.get_clock().now().to_msg()
@@ -295,14 +362,32 @@ class MiningTruckSim(Node):
         msg.angle_increment = 2.0 * math.pi / beams
         msg.range_min = r_min
         msg.range_max = r_max
-        msg.ranges = [0.0] * beams
-        for i in range(beams):
-            a = msg.angle_min + i * msg.angle_increment
-            dx, dy = math.cos(self.yaw + a), math.sin(self.yaw + a)
-            r = self.static_world.raycast(lx, ly, dx, dy, r_max)
-            r_dyn = self.dynamic_world.raycast(lx, ly, dx, dy, r_max)
-            r = min(r, r_dyn)
-            msg.ranges[i] = r if r >= r_min else float('inf')
+
+        if self._np is not None:
+            # numpy 路径：静态世界整块向量化求交；动态障碍物（通常为空或个位数）
+            # 仍走纯 Python 逐条，避免为小规模数据付广播开销
+            npx = self._np
+            c, s = math.cos(self.yaw), math.sin(self.yaw)
+            dx = self._beam_cos * c - self._beam_sin * s
+            dy = self._beam_sin * c + self._beam_cos * s
+            ranges = raycast_static_np(self._static_rects_np, self._static_pillars_np,
+                                       lx, ly, dx, dy, r_max)
+            if self.dynamic_world.rects or self.dynamic_world.pillars:
+                for i in range(beams):
+                    r_dyn = self.dynamic_world.raycast(lx, ly, float(dx[i]), float(dy[i]), r_max)
+                    if r_dyn < ranges[i]:
+                        ranges[i] = r_dyn
+            msg.ranges = npx.where(ranges >= r_min, ranges, npx.inf).tolist()
+        else:
+            # 语义：未命中为 inf（0.0 是非法值且会被消费者当近障碍）
+            msg.ranges = [float('inf')] * beams
+            for i in range(beams):
+                a = msg.angle_min + i * msg.angle_increment
+                dx, dy = math.cos(self.yaw + a), math.sin(self.yaw + a)
+                r = self.static_world.raycast(lx, ly, dx, dy, r_max)
+                r_dyn = self.dynamic_world.raycast(lx, ly, dx, dy, r_max)
+                r = min(r, r_dyn)
+                msg.ranges[i] = r if r >= r_min else float('inf')
         self.scan_pub.publish(msg)
 
     # ---------- 模拟 AprilTag：充电桩在 base_link 系下的位姿 ----------
