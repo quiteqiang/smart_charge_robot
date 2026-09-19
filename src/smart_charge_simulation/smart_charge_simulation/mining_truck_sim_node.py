@@ -270,6 +270,7 @@ class MiningTruckSim(Node):
                     kin = parse_kinematics(f.read())
             except OSError:
                 kin = None
+        self._kinematics_from_urdf = kin is not None
         if kin is None:
             self.get_logger().warn(
                 f'URDF 运动学参数不可用（{urdf_file or "未找到文件"}），'
@@ -284,8 +285,25 @@ class MiningTruckSim(Node):
             f'wheel_separation={self._wheel_separation}, '
             f'laser_x={self._laser_x}')
 
+    def _wheel_kinematics(self) -> tuple[float, float]:
+        """(wheel_separation, wheel_radius)。
+
+        URDF 模式用启动时缓存（单一事实源）；fallback 模式每次实时读参，
+        保留 ros2 param set 在线标定能力（review finding 5）。
+        """
+        if self._kinematics_from_urdf:
+            return self._wheel_separation, self._wheel_radius
+        return (float(self.get_parameter('wheel_separation').value),
+                float(self.get_parameter('wheel_radius').value))
+
     def _on_set_scan_params(self, params):
-        """缓存型激光参数（scan_beams/range_min/range_max/laser_x）运行时更新。"""
+        """缓存型激光参数（scan_beams/range_min/range_max）运行时更新。
+
+        kinematics 参数（laser_x/wheel_radius/wheel_separation）在 URDF
+        模式下拒绝运行时覆盖：TF 由 robot_state_publisher 按 URDF 发布，
+        单方面移动 raycast 原点会使 scan 与其坐标系脱节（review finding 4）；
+        fallback 模式下 laser_x 仍可改，轮参数由 _wheel_kinematics 实时读取。
+        """
         result = SetParametersResult()
         result.successful = True
         result.reason = ''
@@ -311,8 +329,20 @@ class MiningTruckSim(Node):
                     self._scan_range_min = p.value
                 elif p.name == 'range_max':
                     self._scan_range_max = p.value
+                elif self._kinematics_from_urdf:
+                    result.successful = False
+                    result.reason = ('laser_x 单一事实源为 URDF（#8）：运行时覆盖'
+                                     '会使 scan 与 base_laser TF 脱节')
+                    continue
                 else:
                     self._laser_x = p.value
+            elif p.name in ('wheel_radius', 'wheel_separation'):
+                # URDF 模式：单一事实源，拒绝 silent no-op；fallback 模式
+                # 每次 tick 实时读取（_wheel_kinematics），此处无需动作
+                if self._kinematics_from_urdf:
+                    result.successful = False
+                    result.reason = f'{p.name} 单一事实源为 URDF（#8）'
+                    continue
         return result
 
     def _on_cmd(self, msg: Twist) -> None:
@@ -368,8 +398,7 @@ class MiningTruckSim(Node):
         self.x += v * math.cos(self.yaw) * dt
         self.y += v * math.sin(self.yaw) * dt
         self.yaw = normalize_angle(self.yaw + w * dt)
-        sep = self._wheel_separation
-        radius = self._wheel_radius
+        sep, radius = self._wheel_kinematics()
         self.wheel_l += (v - w * sep / 2.0) / radius * dt
         self.wheel_r += (v + w * sep / 2.0) / radius * dt
 

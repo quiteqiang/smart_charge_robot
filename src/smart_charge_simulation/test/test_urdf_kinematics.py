@@ -67,3 +67,11 @@ def test_missing_laser_returns_none():
 def test_garbage_returns_none():
     assert parse_kinematics('<robot><unclosed>') is None
     assert parse_kinematics('') is None
+
+
+def test_malformed_attributes_fall_back_not_crash():
+    """可解析但属性畸形（短 xyz / 非数值 radius）必须回退 None 而不是抛异常。"""
+    short_xyz = MINIMAL_URDF.replace('xyz="0.15 0.0 0.38"', 'xyz="0.15 0.0"')
+    assert parse_kinematics(short_xyz) is None
+    bad_radius = MINIMAL_URDF.replace('radius="0.10"', 'radius="abc"')
+    assert parse_kinematics(bad_radius) is None

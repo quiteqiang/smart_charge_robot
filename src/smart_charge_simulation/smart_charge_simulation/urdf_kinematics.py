@@ -35,32 +35,33 @@ def _origin_xyz(joint: ET.Element) -> tuple[float, float, float]:
 
 def parse_kinematics(urdf_xml: str) -> Kinematics | None:
     """解析 URDF 文本；缺项/不可解析返回 None（不抛异常）。"""
+    # 承诺不抛异常：属性缺失/非数值等"可解析但畸形"的 URDF 一律回退 yaml，
+    # 不能让 sim 节点死在启动路径上（review finding 3）
     try:
         root = ET.fromstring(urdf_xml)
-    except ET.ParseError:
+        laser_x: float | None = None
+        wheels: list[tuple[float, float]] = []   # (joint origin y, wheel radius)
+
+        for joint in root.iter('joint'):
+            child = joint.find('child')
+            if child is None:
+                continue
+            child_name = child.get('link', '')
+            _, y, _ = _origin_xyz(joint)
+            if child_name == 'base_laser':
+                x, _, _ = _origin_xyz(joint)
+                laser_x = x
+            elif 'wheel' in child_name:
+                link = root.find(f".//link[@name='{child_name}']")
+                cyl = link.find('.//geometry/cylinder') if link is not None else None
+                if cyl is not None and cyl.get('radius'):
+                    wheels.append((y, float(cyl.get('radius'))))
+
+        if laser_x is None or len(wheels) < 2:
+            return None
+        (y1, r1), (y2, r2) = wheels[0], wheels[1]
+        return Kinematics(wheel_radius=(r1 + r2) / 2.0,
+                          wheel_separation=abs(y1 - y2),
+                          laser_x=laser_x)
+    except (ValueError, ET.ParseError):
         return None
-
-    laser_x: float | None = None
-    wheels: list[tuple[float, float]] = []   # (joint origin y, wheel radius)
-
-    for joint in root.iter('joint'):
-        child = joint.find('child')
-        if child is None:
-            continue
-        child_name = child.get('link', '')
-        _, y, _ = _origin_xyz(joint)
-        if child_name == 'base_laser':
-            x, _, _ = _origin_xyz(joint)
-            laser_x = x
-        elif 'wheel' in child_name:
-            link = root.find(f".//link[@name='{child_name}']")
-            cyl = link.find('.//geometry/cylinder') if link is not None else None
-            if cyl is not None and cyl.get('radius'):
-                wheels.append((y, float(cyl.get('radius'))))
-
-    if laser_x is None or len(wheels) < 2:
-        return None
-    (y1, r1), (y2, r2) = wheels[0], wheels[1]
-    return Kinematics(wheel_radius=(r1 + r2) / 2.0,
-                      wheel_separation=abs(y1 - y2),
-                      laser_x=laser_x)

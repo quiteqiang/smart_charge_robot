@@ -241,10 +241,15 @@ class ChargeMission(Node):
             return
         self._nav_goal_handle = handle
         result_future = handle.get_result_async()
-        result_future.add_done_callback(lambda f: self._on_nav_result(f, name, source))
+        result_future.add_done_callback(
+            lambda f: self._on_nav_result(f, name, source, handle))
 
-    def _on_nav_result(self, future, name: str, source: str) -> None:
-        self._nav_goal_handle = None
+    def _on_nav_result(self, future, name: str, source: str, handle) -> None:
+        # 句柄身份比较：goto/start_task 抢占后，被取消旧目标的迟到结果
+        # 不得清掉新目标的句柄——否则错误态/下次抢占的 cancel 会落空，
+        # Nav2 继续执行已过期目标（review finding 2，#7）
+        if self._nav_goal_handle is handle:
+            self._nav_goal_handle = None
         try:
             result = future.result()
             ok = result.status == GoalStatus.STATUS_SUCCEEDED

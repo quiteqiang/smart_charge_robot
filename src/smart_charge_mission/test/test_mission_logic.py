@@ -503,6 +503,28 @@ def test_start_task_preempts_executing(m):
     assert m.state == EXECUTING_TASK
 
 
+def test_stale_retry_after_preempt_ignored(m):
+    """抢占后 1s 前失败的旧目标重试到点：不得重发已取消目标（review finding 1）。
+
+    时序：work_2 失败一次（nav_retries=1，retry oneshot 挂起）-> start_task
+    抢占重来 -> 孤儿 retry(work_2) 到点。无守卫时它会覆盖新目标 work_1，
+    再失败两次就把新任务拖进 ERROR_WAITING_HUMAN。
+    """
+    start(m)
+    m.nav_done(True, 'work_1', 'task')
+    m.nav_sent('work_2', 'task')
+    fx = m.nav_done(False, 'work_2', 'task')   # work_2 失败，安排 1s 后重试
+    assert 'oneshot' in kinds(fx) and m.nav_retries == 1
+    ok, _, fx = m.start_task()                  # 抢占：取消 work_2，重排队列
+    assert ok
+    m.nav_sent('work_1', 'task')
+    assert m._active_nav_target == 'work_1'
+    fx = m.retry_nav('work_2', 'task')          # 孤儿重试到点
+    assert fx == []                             # 被守卫丢弃
+    assert m._active_nav_target == 'work_1'     # 新目标未被覆盖
+    assert m.nav_retries == 0                   # 抢占重置了重试预算
+
+
 def test_start_task_rejected_in_charge_cycle(m):
     """非 IDLE/EXECUTING_TASK（充电循环中）仍拒绝，抢占不破坏安全状态。"""
     arrive_at_dock(m)

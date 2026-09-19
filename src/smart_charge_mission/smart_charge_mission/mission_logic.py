@@ -113,6 +113,10 @@ class MissionStateMachine:
         self._low_battery_dwell_id = 0   # LOW_BATTERY 停留世代（孤儿 oneshot 防护）
         self.nav_retries = 0
         self.dock_retries = 0
+        # 待执行的导航重试（nav_done 失败时登记）：retry_nav 到点须校验
+        # 仍是同一目标，否则 start_task/goto 抢占后，旧目标的孤儿重试会
+        # 重发已被用户取消的目标（improvement_directions #7 review 修复）
+        self._retry_pending: str | None = None
         # 活动导航目标名（goal handle 由壳持有）；以目标名判定而非 handle：
         # 目标已发出但尚未被接受时 handle 仍为 None，此时航点同样需要保存
         self._active_nav_target: str | None = None
@@ -178,6 +182,8 @@ class MissionStateMachine:
                       '重新开始任务队列')
             self._emit(fx_cancel_nav())
             self._active_nav_target = None
+            self.nav_retries = 0
+            self._retry_pending = None
         self.task_queue = list(self.task_waypoints)
         self._log('info', f'任务队列: {self.task_queue}')
         self._advance_task()
@@ -190,6 +196,7 @@ class MissionStateMachine:
         self.saved_task = None
         self.task_queue.clear()
         self.nav_retries = self.dock_retries = 0
+        self._retry_pending = None
         self._fx = []
         self._set_state(IDLE, '人工复位')
         return True, 'reset to IDLE', self._fx
@@ -218,6 +225,9 @@ class MissionStateMachine:
             self._log('warn',
                       f'goto 抢占：导航目标 {self._active_nav_target} -> {name}')
             self._emit(fx_cancel_nav())
+            self._active_nav_target = None
+            self.nav_retries = 0
+            self._retry_pending = None
             self._emit(fx_nav_goal(name, 'task'))
         return self._fx
 
@@ -283,6 +293,7 @@ class MissionStateMachine:
         else:
             self._log('warn',
                       f'导航重试 {self.nav_retries}/{self.max_nav_retries}: {name}')
+            self._retry_pending = name
             self._emit(fx_oneshot(1.0, 'retry_nav', (name, source)))
         return self._fx
 
@@ -295,6 +306,12 @@ class MissionStateMachine:
                     'resume_none': (RESUMING_TASK,)}[source]
         if self.state not in expected:
             return self._fx
+        # 孤儿重试防护：1s 等待期间若发生抢占，旧目标的重试必须作废，
+        # 否则会重发用户已取消的目标并覆盖新意图（review finding 1）
+        if name != self._retry_pending:
+            self._log('warn', f'忽略孤儿导航重试: {name}（当前意图已变更）')
+            return self._fx
+        self._retry_pending = None
         self._emit(fx_nav_goal(name, source))
         return self._fx
 
@@ -358,6 +375,10 @@ class MissionStateMachine:
         self._set_state(NAVIGATING_TO_DOCK, '规划充电路径')
         self.nav_retries = 0
         self.dock_retries = 0
+        # 待执行的导航重试（nav_done 失败时登记）：retry_nav 到点须校验
+        # 仍是同一目标，否则 start_task/goto 抢占后，旧目标的孤儿重试会
+        # 重发已被用户取消的目标（improvement_directions #7 review 修复）
+        self._retry_pending: str | None = None
         if self.pre_dock_waypoint not in self.waypoints:
             self._enter_error('无法规划充电路径：预停靠点无效')
             return self._fx
