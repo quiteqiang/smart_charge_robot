@@ -72,11 +72,16 @@ class DockController(Node):
         self.declare_parameter('undock_timeout_s', 30.0)
         self.declare_parameter('control_hz', 20.0)
         self.declare_parameter('pose_timeout_s', 1.0)
+        # 连续丢失容忍：位姿短暂丢失（高负载下的一帧延迟/jitter）时刹车等待，
+        # 累计丢失超过该时长才判失败，避免瞬时感知抖动放大成整次泊靠失败。
+        self.declare_parameter('pose_lost_tolerance_s', 0.5)
 
         self.state = self.ST_IDLE
         self._result_seq = 0   # 结果世代计数：每次 _finish 递增，防止 mission 端假成功
         self.dock_rel: tuple[float, float, float] | None = None   # x, y, yaw(base 系)
         self.dock_rel_stamp = Time()
+        self._pose_lost_cycles = 0   # 连续丢失位姿的控制周期数（瞬时丢失可容忍）
+        self._control_hz = float(self.get_parameter('control_hz').value)
         self.front_min_range = float('inf')
         self.start_time = Time()
         self.start_x = 0.0
@@ -124,6 +129,7 @@ class DockController(Node):
             return response
         self.state = self.ST_ALIGN
         self.start_time = self.get_clock().now()
+        self._pose_lost_cycles = 0
         self._report(f'开始泊靠, 相对位姿 x={self.dock_rel[0]:.2f} y={self.dock_rel[1]:.2f}')
         response.success = True
         response.message = 'docking started'
@@ -136,6 +142,7 @@ class DockController(Node):
             return response
         self.state = self.ST_REVERSE
         self.start_time = self.get_clock().now()
+        self._pose_lost_cycles = 0
         self.start_x = self.dock_rel[0] if self.dock_rel else 0.0
         self._report('开始离桩倒车')
         response.success = True
@@ -150,11 +157,24 @@ class DockController(Node):
         if self.state == self.ST_IDLE:
             return
 
-        # 位姿数据失效保护
+        # 位姿数据失效保护：单帧超时不立即失败，连续丢失超过容忍时长才判失败。
+        # 短暂丢失期间刹车等待数据恢复（sim 端 /dock_relative_pose 为 10 Hz，
+        # 瞬时 age 超阈值多为负载抖动而非真丢失）。
         pose_age = (now - self.dock_rel_stamp).nanoseconds * 1e-9
         if self.state in (self.ST_ALIGN, self.ST_APPROACH, self.ST_FINAL, self.ST_REVERSE):
-            if self.dock_rel is None or pose_age > self.get_parameter('pose_timeout_s').value:
-                self._finish(False, '充电桩位姿数据失效')
+            fresh = (self.dock_rel is not None
+                     and pose_age <= self.get_parameter('pose_timeout_s').value)
+            if fresh:
+                self._pose_lost_cycles = 0
+            else:
+                self._pose_lost_cycles += 1
+                lost_cycles_max = max(
+                    1, round(self._control_hz
+                             * self.get_parameter('pose_lost_tolerance_s').value))
+                if self._pose_lost_cycles >= lost_cycles_max:
+                    self._finish(False, '充电桩位姿数据失效')
+                    return
+                self.cmd_pub.publish(Twist())   # 刹车等待，本周期不出指令
                 return
 
         x, y, dyaw = self.dock_rel

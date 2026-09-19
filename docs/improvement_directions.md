@@ -2,6 +2,8 @@
 
 > 分析日期：2026-09-16 · 基于 `develop` 分支代码逐文件深读
 > （mission 状态机 / battery 仿真 / docking 控制器 / sim 节点 / launch / nav2 参数 / 集成测试）
+> 进度更新（2026-09-19）：P0 #1、#2 已修复并过 `/code-review medium`
+> （分支 `fix/p0-dock-pose-loss-and-scan-perf`，review 发现 1 项 Low 已修）
 
 ## 总体评价
 
@@ -15,6 +17,13 @@
 
 ### 1. 泊靠控制器对 `dock_rel` 的解包未判空（`dock_controller_node.py:155`）
 
+> ✅ **已修复**（2026-09-19，commit `a6aacbe`）：控制器不再因单帧 age 超阈值瞬时判失败，
+> 改为连续丢失容忍——新增 `pose_lost_tolerance_s`（默认 0.5s，按 control_hz 折算周期数），
+> 短暂丢失期间刹车等待数据恢复，累计超限才 `_finish(False)`；计数在收到新数据及
+> dock/undock 启动时重置。同时 sim 端 `/dock_relative_pose` 由 5 Hz 提到 10 Hz，
+> 对 1.0s 的 `pose_timeout_s` 留出更大抖动裕度。场景 7（感知丢失→重试 3 次→错误态）语义不变，
+> 仅失败判定从"瞬时 1s"变为"约 1.5s 累计"。
+
 ```python
 x, y, dyaw = self.dock_rel      # 第 74 行只声明了类型 Optional
 ```
@@ -26,6 +35,17 @@ x, y, dyaw = self.dock_rel      # 第 74 行只声明了类型 Optional
 - 或者 sim 端把 dock pose 提到 10-20 Hz（计算量极小），同时控制器加死区。
 
 ### 2. sim 节点激光计算的 O(n·m) 开销（`mining_truck_sim_node.py:299-305`）
+
+> ✅ **已修复**（2026-09-19，commit `e618edd` + review 修复 `789528f`）：静态世界加载时转为
+> (R,4)/(P,3) numpy 数组，每帧光束方向由缓存角度数组旋转变换得到（消除逐 beam 三角函数），
+> slab/圆求交整块的 (B,R)/(B,P) 数组运算完成（`raycast_static_np`）。实测当前地图
+> （7 rect + 1 pillar）**3.8× 提速**（0.75ms→0.20ms/帧），且随世界增大差距线性拉大
+> （标量路径随物体数线性增长，向量化路径基本平坦）。已向量化/标量两路做对拍验证
+> （3000 随机世界 × 180 光束 + 矩形内/柱内/贴墙边界扫描，0 不一致）。
+> `msg.ranges` 初始化同步改为 `inf`（顺手修掉 #13 表中对应行）。
+> numpy 为**可选依赖**（Dockerfile 与 package.xml 已加 `python3-numpy`）：缺 numpy 的瘦主机
+> 自动回退原纯 Python 路径。动态障碍物（通常为空/单个 rect）仍逐条标量求交，不付广播开销。
+> review 发现的"缓存参数 ros2 param set 不生效"问题已通过 `on_set_parameters` 回调修复。
 
 每帧 180 beam，每条 beam 对 static_world 的每条 rect + pillar 做解析求交。**每帧 ~数百次求交，纯 Python**。目前 8 Hz 在小世界能撑住，但：world 变大、beam 变密、或跑在 1.9GB 瘦主机上 CPU 受限时，scan 周期会被拉长 → AMCL 更新延迟 → 定位抖动 → 连锁影响导航。且 `_publish_scan` 里 `msg.ranges = [0.0] * beams` 后又逐元素填充，`r < r_min` 时填 `inf`——注意 **0.0 是非法值但有些消费者当 0 处理**，初始 0.0 若未被覆盖（不会，循环全覆盖）倒是没问题，但语义上应初始化为 `inf` 更稳。
 
@@ -129,7 +149,7 @@ x, y, dyaw = self.dock_rel      # 第 74 行只声明了类型 Optional
 | `charge_mission_node.py` `_on_battery` | NaN/越界 SOC 直接 `_enter_error`，单帧毛刺就杀掉整个任务 | 连续 N 帧（如 5 帧 @2Hz）异常才进错误态 |
 | `charge_mission_node.py` 模块级 | `import yaml` 无异常处理，waypoints 文件不存在时裸 traceback | try/except + 清晰错误信息 + 非零退出 |
 | `battery_simulator_node.py` 函数内 import | 函数内 `from geometry_msgs.msg import ...`，风格不一致 | 移到模块顶部 |
-| `mining_truck_sim_node.py` `_publish_scan` | `msg.ranges` 初始 `0.0` 应为 `inf` | 一行 |
+| `mining_truck_sim_node.py` `_publish_scan` | ~~`msg.ranges` 初始 `0.0` 应为 `inf`~~ ✅ 已修（`e618edd`，随 #2 一并完成） | 一行 |
 | `dock_controller_node.py` | `_poll_dock_result` 递归 oneshot 创建/销毁定时器链，线程安全依赖 rclpy 单线程 executor 假设 | 文档化该假设，或改为单一定时器 + 状态判断 |
 | 各节点 | `get_parameter(...).value` 在 20Hz 控制循环内反复调用（dock_controller 每个周期读 10+ 次参数） | `__init__` 缓存；确实需要运行时调的（charge_rate 有注释说明）才保留动态读 |
 
@@ -142,7 +162,7 @@ x, y, dyaw = self.dock_rel      # 第 74 行只声明了类型 Optional
                   LOW_BATTERY 状态语义、reset 上下文清理
 第 2 步（2-3 天）：#4 状态机纯 Python 化 + 单测 + #5 CI（build+单测）
                   —— 之后每次改动反馈从 15 分钟降到秒级
-第 3 步（按需）：  #1 感知丢失容忍、#3 阈值单源化、#6 电池 CC/CV、#8 TF 单源化
+第 3 步（按需）：  #1 ✅（2026-09-19 已完成）、#3 阈值单源化、#6 电池 CC/CV、#8 TF 单源化
 第 4 步（上硬件前）：#12 感知噪声模拟 + 真实 BMS/AprilTag adapter
 ```
 
