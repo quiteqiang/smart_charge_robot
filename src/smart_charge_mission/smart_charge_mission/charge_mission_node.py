@@ -86,7 +86,18 @@ class ChargeMission(Node):
         self.waypoints: dict[str, dict] = data['waypoints']
 
         def _log(level: str, msg: str) -> None:
-            getattr(self.get_logger(), level)(msg)
+            # rclpy 按调用点 (文件/行) 缓存 severity：同一行不得用不同级别
+            # 记录（否则 ValueError: Logger severity cannot be changed between
+            # calls），因此每个级别必须固定从各自的源码行发出
+            logger = self.get_logger()
+            if level == 'info':
+                logger.info(msg)
+            elif level == 'warn':
+                logger.warn(msg)
+            elif level == 'error':
+                logger.error(msg)
+            else:
+                logger.debug(msg)
 
         self.machine = MissionStateMachine(
             waypoints=self.waypoints,

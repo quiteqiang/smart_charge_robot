@@ -501,3 +501,15 @@ def test_update_config_applies_live(m):
     dock_successfully(m)
     m.battery(0.60, True, now=20.0)   # 0.60 >= 新的 0.50 阈值
     assert m.state == UNDOCKING
+
+
+def test_shell_logger_dispatch_has_fixed_severity_per_line():
+    """防回归（集成测试曾抓到的崩溃）：rclpy 按调用点缓存 severity，
+    同一源码行用 getattr 等动态分发不同级别会抛
+    ValueError('Logger severity cannot be changed between calls') 并杀死节点。
+    壳的 _log 必须为每个级别使用固定的独立源码行。"""
+    shell = os.path.join(os.path.dirname(__file__), '..',
+                         'smart_charge_mission', 'charge_mission_node.py')
+    src = open(shell, encoding='utf-8').read()
+    assert 'getattr(self.get_logger()' not in src
+    assert 'getattr(logger' not in src
