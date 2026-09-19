@@ -4,7 +4,9 @@
 > （mission 状态机 / battery 仿真 / docking 控制器 / sim 节点 / launch / nav2 参数 / 集成测试）
 > 进度更新（2026-09-19）：P0 #1、#2 已修复并过 `/code-review medium`
 > （分支 `fix/p0-dock-pose-loss-and-scan-perf`，review 发现 1 项 Low 已修）；
-> P1 #3、#4 已修复（review 发现 2 项 Medium + 2 项 Low 已全部修复，状态机单测 38 例全绿）
+> P1 #3、#4 已修复（review 发现 2 项 Medium + 2 项 Low 已全部修复，状态机单测 38 例全绿）；
+> P1 #5（CI）、#6（电池模型）已修复（review 发现 1 项 Medium + 1 项 Low 已修，
+> 单测累计 56 例全绿）
 
 ## 总体评价
 
@@ -103,6 +105,15 @@ x, y, dyaw = self.dock_rel      # 第 74 行只声明了类型 Optional
 
 ### 5. CI 缺失
 
+> ✅ **已修复**（2026-09-19，commit `e3b0803` + review 修复 `e7b633f`）：新增
+> `.github/workflows/ci.yml`。PR/每次推送：dev 镜像构建（gha 层缓存）→
+> `pytest src`（纯 Python 单测，秒级，无需 ROS）→ `colcon build`；每晚 cron +
+> 手动触发跑完整集成测试（`scripts/run_tests.sh`，9 场景）。容器内以 root 运行
+> 避开 GH runner uid(1001) 与 compose 用户 (1000) 的挂载属主冲突；nightly 任务
+> 先 `chown -R 1000:1000` 让 ros2bag 能写回挂载目录。review 发现的"fork PR 的
+> cache-to 无写权限会挂构建"已用条件表达式修复（仅同仓库 PR/推送导出缓存）。
+> lint（ruff/mypy）暂未纳入——存量代码未跑过 lint，先保证 CI 常绿，留作后续。
+
 有 Docker（`docker-compose.yml` + `scripts/build.sh`）却没有 `.github/workflows/`。集成测试贵（15 分钟），但 **build + 单测（若做了 #4）+ lint** 应该每次 PR 跑。
 
 **改进**：
@@ -110,6 +121,16 @@ x, y, dyaw = self.dock_rel      # 第 74 行只声明了类型 Optional
 - 加 `ruff`/`flake8` + `mypy --strict`（代码已大量用类型注解，收紧成本很低）。
 
 ### 6. 电池模型过于理想化，限制了仿真价值
+
+> ✅ **已修复**（2026-09-19，commit `c3c8f9a` + review 修复 `e7b633f`）：电池模型
+> 抽为纯 Python 的 `BatteryModel`（`battery_model.py`，不依赖 rclpy，16 例单测），
+> 节点退化为 ROS IO 薄壳，与 #4 状态机同一模式。已实现：① CC/CV 两段充电
+> （`cc_cv_threshold` 默认 0.8，以下恒流满速，以上线性降速到 0——resume 阈值
+> 0.85 落在 CV 段，"充到 85% 要多久"现在更真实）；② 端电压 = OCV(soc) − |I|·R，
+> 一阶滞后逼近（`voltage_tau_s`），`/battery_state` 新增 `current` 字段；③ 内部
+> Ah 记账，SOC = charge/capacity。顺手修复原实现缺陷：满电挂桩时旧代码掉入放电
+> 分支造成"满电振荡"。review 发现的 `capacity_ah` 无校验已补 ValueError。
+> ROS 接口/发布频率不变，`ros2 param set charge_rate` 实时调参路径保持可用。
 
 `battery_simulator_node.py` 的模型：SOC 线性充放电，电压 = 22 + 4·SOC（注释自述"示例"）。没有：
 - 内阻/压降（大电流行驶时电压下垂）；
@@ -180,9 +201,9 @@ x, y, dyaw = self.dock_rel      # 第 74 行只声明了类型 Optional
 ```
 第 1 步（已完成）：任务队列保留（#7）、结果通道竞态修复（DockResult 世代校验）、
                   LOW_BATTERY 状态语义、reset 上下文清理
-第 2 步（2-3 天）：#4 状态机纯 Python 化 ✅（2026-09-19 已完成，38 例单测）；
-                  剩余 #5 CI（build+单测）—— 之后每次改动反馈从 15 分钟降到秒级
-第 3 步（按需）：  #1 ✅、#3 ✅（均 2026-09-19 完成）、#6 电池 CC/CV、#8 TF 单源化
+第 2 步（已完成）：#4 状态机纯 Python 化 ✅、#5 CI ✅（2026-09-19，build+单测
+                  分钟级反馈，集成测试每晚跑）——改动反馈从 15 分钟降到秒级
+第 3 步（按需）：  #1 ✅、#3 ✅、#6 ✅（均 2026-09-19 完成）、#8 TF 单源化
 第 4 步（上硬件前）：#12 感知噪声模拟 + 真实 BMS/AprilTag adapter
 ```
 
