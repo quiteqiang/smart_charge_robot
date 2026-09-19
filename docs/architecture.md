@@ -62,7 +62,7 @@
 | `/docking_success` | smart_charge_msgs/DockResult | dock_controller | mission | TRANSIENT_LOCAL，泊靠/离桩结果；`sequence` 单调递增，mission 端只接受晚于本次请求的结果（防 latched 旧值假成功） |
 | `/docking_status` | std_msgs/String | dock_controller | mission/日志 | 泊靠过程文本 |
 | `/mission_state` | std_msgs/String | mission | 测试/RViz | 状态机当前状态 |
-| `/mission/goto` | std_msgs/String | navigate_to_task/测试 | mission | 单航点任务请求 |
+| `/mission/goto` | std_msgs/String | navigate_to_task/测试 | mission | 跳转到指定航点：IDLE 作单点任务执行；EXECUTING_TASK 抢占（显式取消当前目标，替换当前航点，队列保留） |
 | `/status_text`、`/battery_text_markers` | visualization_msgs/Marker(Array) | mission/battery | RViz | 电量与状态文本 |
 | `/visualization_marker_dock` | visualization_msgs/Marker | sim | RViz | 充电桩位置 |
 | `/sim/obstacles` | visualization_msgs/Marker | 测试 | sim | 动态障碍物注入（ADD/DELETE） |
@@ -72,7 +72,7 @@
 ### 服务
 | 服务 | 类型 | 提供方 | 用途 |
 |---|---|---|---|
-| `/mission/start_task` | std_srvs/Trigger | mission | 启动任务队列 work_1→work_2 |
+| `/mission/start_task` | std_srvs/Trigger | mission | 启动任务队列 work_1→work_2；EXECUTING_TASK 中可抢占重来（与 goto 同级，improvement_directions #7） |
 | `/mission/reset` | std_srvs/Trigger | mission | ERROR_WAITING_HUMAN 人工复位 |
 | `/set_soc` | smart_charge_msgs/SetSoc | battery | 测试注入 SOC |
 | `/dock/start`、`/dock/undock` | std_srvs/Trigger | dock_controller | 泊靠/离桩 |

@@ -63,7 +63,16 @@ def assert_stays(m, state, effects):
 def start(m):
     ok, msg, fx = m.start_task()
     assert ok and m.state == EXECUTING_TASK
+    m.nav_sent('work_1', 'task')   # 壳在 goal 发出后回报
     return fx
+
+
+def send_nav(m, fx):
+    """按壳契约处理 fx_nav_goal：发 goal -> nav_sent。返回 goal 名。"""
+    goals = nav_goals(fx)
+    assert len(goals) == 1
+    m.nav_sent(*goals[0])
+    return goals[0]
 
 
 def arrive_at_dock(m):
@@ -72,6 +81,7 @@ def arrive_at_dock(m):
     m.battery(0.20, False, now=0.0)
     m.plan_charge_route(m._low_battery_dwell_id)
     assert m.state == NAVIGATING_TO_DOCK
+    m.nav_sent('pre_dock', 'dock')
     m.nav_done(True, 'pre_dock', 'dock')
     assert m.state == PRE_DOCKING
 
@@ -96,17 +106,20 @@ def test_start_task_from_idle(m):
     assert m.task_queue == ['work_2']
 
 
-def test_start_task_busy_rejected(m):
+def test_start_task_rejected_in_non_task_states(m):
     start(m)
+    m.battery(0.20, False, now=0.0)   # -> LOW_BATTERY（非 IDLE/EXECUTING_TASK）
     ok, msg, fx = m.start_task()
     assert not ok and '无法开始任务' in msg
-    assert fx == [] and m.state == EXECUTING_TASK
+    assert fx == [] and m.state == LOW_BATTERY
 
 
 def test_task_completion_advances_and_finishes(m):
     start(m)
+    m.nav_sent('work_1', 'task')   # 壳在 goal 发出后回报
     m.nav_done(True, 'work_1', 'task')
     assert m.state == EXECUTING_TASK
+    m.nav_sent('work_2', 'task')   # advance 发出新 goal，壳回报
     m.nav_done(True, 'work_2', 'task')
     assert m.state == IDLE
 
@@ -115,6 +128,7 @@ def test_full_task_cycle_goto(m):
     """场景 1 浓缩：IDLE goto -> 执行 -> 完成。"""
     fx = m.goto('work_1')
     assert nav_goals(fx) == [('work_1', 'task')]
+    m.nav_sent('work_1', 'task')
     m.nav_done(True, 'work_1', 'task')
     assert m.state == IDLE
 
@@ -186,6 +200,7 @@ def test_resume_saved_task_after_charge(m):
     m.nav_sent('work_1', 'task')
     m.battery(0.20, False, now=0.0)
     m.plan_charge_route(m._low_battery_dwell_id)
+    m.nav_sent('pre_dock', 'dock')   # 壳在 goal 发出后回报
     m.nav_done(True, 'pre_dock', 'dock')
     dock_successfully(m)
     fx = m.battery(0.90, True, now=20.0)
@@ -196,6 +211,7 @@ def test_resume_saved_task_after_charge(m):
     fx = m.poll_undock(now=21.0)
     assert m.state == RESUMING_TASK
     assert nav_goals(fx) == [('work_1', 'task')]
+    m.nav_sent('work_1', 'task')   # 壳在 goal 发出后回报
     m.nav_done(True, 'work_1', 'task')
     assert m.saved_task is None
     # 剩余队列续跑
@@ -206,6 +222,7 @@ def test_resume_none_when_no_saved_task(m):
     """低电量发生在 IDLE：充电完成后直接回 IDLE（resume_none 路径）。"""
     m.battery(0.20, False, now=0.0)
     m.plan_charge_route(m._low_battery_dwell_id)
+    m.nav_sent('pre_dock', 'dock')   # 壳在 goal 发出后回报
     m.nav_done(True, 'pre_dock', 'dock')
     dock_successfully(m)
     m.battery(0.90, True, now=20.0)
@@ -214,6 +231,7 @@ def test_resume_none_when_no_saved_task(m):
     fx = m.poll_undock(now=21.0)
     assert m.state == RESUMING_TASK
     assert nav_goals(fx) == [('pre_dock', 'resume_none')]
+    m.nav_sent('pre_dock', 'resume_none')   # 壳在 goal 发出后回报
     m.nav_done(True, 'pre_dock', 'resume_none')
     assert m.state == IDLE
 
@@ -278,6 +296,7 @@ def test_dock_failure_retries_exhausted(m):
             assert m.state == NAVIGATING_TO_DOCK, f'第 {attempt} 次失败后应退回重试'
             assert m.dock_retries == attempt
             assert nav_goals(fx) == [('pre_dock', 'dock')]
+            m.nav_sent('pre_dock', 'dock')   # 壳在 goal 发出后回报
             m.nav_done(True, 'pre_dock', 'dock')
         else:
             assert m.state == ERROR_WAITING_HUMAN
@@ -387,8 +406,10 @@ def test_reset_clears_saved_queue_retries(m):
     m.nav_sent('work_1', 'task')
     m.battery(0.20, False, now=0.0)
     m.plan_charge_route(m._low_battery_dwell_id)
+    m.nav_sent('pre_dock', 'dock')   # 壳在 goal 发出后回报
     m.nav_done(False, 'pre_dock', 'dock')
     m.retry_nav('pre_dock', 'dock')
+    m.nav_sent('pre_dock', 'dock')   # 壳在 goal 发出后回报
     m.nav_done(False, 'pre_dock', 'dock')   # nav_retries=2 -> error
     assert m.state == ERROR_WAITING_HUMAN
     m.reset()
@@ -437,6 +458,60 @@ def test_goto_unknown_ignored(m):
     assert fx == [] and m.state == IDLE
 
 
+# ------------------------------------------------------------ 抢占语义 (#7)
+def test_goto_preempt_emits_cancel(m):
+    """抢占必须显式取消旧目标：壳不 cancel 时旧 goal 的迟到结果会毒化新目标。"""
+    start(m)   # active = work_1（start helper 已按壳契约回报 nav_sent）
+    fx = m.goto('work_2')
+    assert 'cancel_nav' in kinds(fx)
+    assert nav_goals(fx) == [('work_2', 'task')]
+    m.nav_sent('work_2', 'task')
+    assert m._active_nav_target == 'work_2'
+
+
+def test_stale_result_after_preempt_ignored(m):
+    """goto 抢占后，被取消旧目标的迟到失败结果不得触发重试/进错误态。"""
+    start(m)
+    m.goto('work_2')
+    m.nav_sent('work_2', 'task')
+    fx = m.nav_done(False, 'work_1', 'task')   # 旧目标被取消的迟到结果
+    assert fx == [] and m.state == EXECUTING_TASK
+    assert m.nav_retries == 0
+    assert m._active_nav_target == 'work_2'   # 新目标不受影响
+
+
+def test_low_battery_after_preempt_saves_goto_target(m):
+    """抢占路径下 saved_task 必须指向用户最后意图的航点（#7 核心保证）。"""
+    start(m)
+    m.goto('work_2')
+    m.nav_sent('work_2', 'task')
+    m.battery(0.20, False, now=0.0)
+    assert m.saved_task == 'work_2'
+    assert m.state == LOW_BATTERY
+
+
+def test_start_task_preempts_executing(m):
+    """start_task 在 EXECUTING_TASK 中也可抢占（修复服务/话题权限倒挂）。"""
+    start(m)
+    m.nav_done(True, 'work_1', 'task')   # 完成 work_1，advance 发 work_2
+    m.nav_sent('work_2', 'task')
+    ok, msg, fx = m.start_task()
+    assert ok
+    assert 'cancel_nav' in kinds(fx)
+    assert nav_goals(fx) == [('work_1', 'task')]   # 队列从头重来
+    assert m.task_queue == ['work_2']
+    assert m.state == EXECUTING_TASK
+
+
+def test_start_task_rejected_in_charge_cycle(m):
+    """非 IDLE/EXECUTING_TASK（充电循环中）仍拒绝，抢占不破坏安全状态。"""
+    arrive_at_dock(m)
+    dock_successfully(m)
+    ok, msg, fx = m.start_task()
+    assert not ok and '无法开始任务' in msg
+    assert fx == [] and m.state == CHARGING
+
+
 # ------------------------------------------------------------ 端到端浓缩
 def test_full_low_battery_cycle(m):
     """场景 3/4/5/6 浓缩：任务中低电量 -> 泊靠 -> 充电 -> 恢复 -> 任务完成。"""
@@ -447,6 +522,7 @@ def test_full_low_battery_cycle(m):
     m.battery(0.20, False, now=1.0)             # 暂停 work_2
     assert m.saved_task == 'work_2'
     m.plan_charge_route(m._low_battery_dwell_id)
+    m.nav_sent('pre_dock', 'dock')   # 壳在 goal 发出后回报
     m.nav_done(True, 'pre_dock', 'dock')
     m.begin_docking(now=2.0)
     m.dock_start_response(True)
@@ -460,6 +536,7 @@ def test_full_low_battery_cycle(m):
     m.dock_result(2, True)
     m.poll_undock(now=31.0)
     assert m.state == RESUMING_TASK
+    m.nav_sent('work_2', 'task')   # 壳在 goal 发出后回报
     m.nav_done(True, 'work_2', 'task')          # 恢复并完成最后一个任务
     assert m.state == IDLE
 

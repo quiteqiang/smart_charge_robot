@@ -163,12 +163,23 @@ class MissionStateMachine:
 
     # ------------------------------------------------------------ 服务事件
     def start_task(self) -> tuple[bool, str, list[Effect]]:
-        """/mission/start_task。返回 (accepted, message, effects)。"""
-        if self.state != IDLE:
+        """/mission/start_task。返回 (accepted, message, effects)。
+
+        IDLE：开始任务队列；EXECUTING_TASK：抢占当前任务并以新队列重新
+        开始——与 /mission/goto 话题拥有同级的抢占能力，修复"正式服务
+        接口反而不能抢占、裸话题却可以"的权限倒挂（improvement_directions #7）。
+        """
+        if self.state not in (IDLE, EXECUTING_TASK):
             return False, f'当前状态 {self.state}，无法开始任务', []
+        self._fx = []
+        if self.state == EXECUTING_TASK:
+            self._log('warn',
+                      f'start_task 抢占：取消当前任务 {self._active_nav_target}，'
+                      '重新开始任务队列')
+            self._emit(fx_cancel_nav())
+            self._active_nav_target = None
         self.task_queue = list(self.task_waypoints)
         self._log('info', f'任务队列: {self.task_queue}')
-        self._fx = []
         self._advance_task()
         return True, 'task started', self._fx
 
@@ -184,7 +195,13 @@ class MissionStateMachine:
         return True, 'reset to IDLE', self._fx
 
     def goto(self, name: str) -> list[Effect]:
-        """/mission/goto 话题。"""
+        """/mission/goto 话题。语义：跳转到指定航点。
+
+        IDLE：作为单点任务执行；EXECUTING_TASK：抢占——显式取消当前导航，
+        目标替换当前航点（剩余队列保留）。低电量挂起时 saved_task 取自
+        _active_nav_target（在 effect 同步执行链中已指向最新意图航点），
+        因此任何抢占路径下 saved_task 都指向用户最后意图（#7）。
+        """
         self._fx = []
         if name not in self.waypoints:
             self._log('error', f'goto 未知航点: {name}')
@@ -198,6 +215,9 @@ class MissionStateMachine:
         else:
             if name == self._active_nav_target:
                 return self._fx  # 忽略重复目标（连发/双击），防止不必要的抢占
+            self._log('warn',
+                      f'goto 抢占：导航目标 {self._active_nav_target} -> {name}')
+            self._emit(fx_cancel_nav())
             self._emit(fx_nav_goal(name, 'task'))
         return self._fx
 
@@ -229,8 +249,15 @@ class MissionStateMachine:
     def nav_done(self, success: bool, name: str, source: str) -> list[Effect]:
         """导航结果（含目标被拒绝，拒绝按失败处理）。"""
         self._fx = []
-        self._active_nav_target = None
         self._log('warn', f'导航 {name} [{"成功" if success else "失败/取消"}] (来源 {source})')
+        # 过期结果防护：目标名与当前活动目标不符（典型：goto/start_task 抢占
+        # 后旧目标被取消的迟到结果）则忽略——否则抢占会被误记为导航失败，
+        # 触发错误重试甚至进错误态
+        if name != self._active_nav_target:
+            self._log('warn',
+                      f'忽略过期导航结果 {name}（当前目标: {self._active_nav_target}）')
+            return self._fx
+        self._active_nav_target = None
         # 结果与当前状态不匹配（如低电量已取消并转充电）则忽略，防止误重试
         if source == 'task' and self.state not in (EXECUTING_TASK, RESUMING_TASK):
             return self._fx
