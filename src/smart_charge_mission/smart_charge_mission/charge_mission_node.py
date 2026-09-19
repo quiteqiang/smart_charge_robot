@@ -100,7 +100,10 @@ class ChargeMission(Node):
 
         # request_id/timer_id -> live rclpy object, populated as commands are executed.
         self._nav_goal_handles: dict[int, object] = {}
-        self._timers: dict[int, object] = {}
+        # Named _pending_oneshots, not _timers: rclpy.Node itself owns a
+        # private self._timers list (appended to by create_timer) — reusing
+        # that name silently shadows it and crashes the first create_timer call.
+        self._pending_oneshots: dict[int, object] = {}
 
         # rclpy.spin(node) below uses the default SingleThreadedExecutor, so
         # MissionCore.handle() is never called concurrently. This callback
@@ -167,7 +170,18 @@ class ChargeMission(Node):
             elif isinstance(cmd, TriggerAck):
                 ack = cmd
             elif isinstance(cmd, Log):
-                getattr(self.get_logger(), cmd.level)(cmd.message)
+                # Each severity is logged from its own line, not via a single
+                # generic getattr(logger, level)(...) call: rclpy's logger
+                # caches a "context" per call *site* (file/line), and raises
+                # ValueError('Logger severity cannot be changed between
+                # calls.') if the same site is later used with a different
+                # severity — which a single dispatch line would do constantly.
+                if cmd.level == 'info':
+                    self.get_logger().info(cmd.message)
+                elif cmd.level == 'warn':
+                    self.get_logger().warn(cmd.message)
+                elif cmd.level == 'error':
+                    self.get_logger().error(cmd.message)
         return ack
 
     @staticmethod
@@ -240,11 +254,11 @@ class ChargeMission(Node):
 
     def _exec_schedule_timer(self, cmd: ScheduleTimer) -> None:
         def fire() -> None:
-            timer = self._timers.pop(cmd.timer_id, None)
+            timer = self._pending_oneshots.pop(cmd.timer_id, None)
             if timer is not None:
                 self.destroy_timer(timer)
             self._dispatch(TimerFired(now=self._now(), timer_id=cmd.timer_id))
-        self._timers[cmd.timer_id] = self.create_timer(cmd.delay_s, fire)
+        self._pending_oneshots[cmd.timer_id] = self.create_timer(cmd.delay_s, fire)
 
     # ------------------------------------------------------------ 服务/话题回调
     def _on_start_task(self, _, response: Trigger.Response) -> Trigger.Response:
